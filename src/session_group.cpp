@@ -25,6 +25,31 @@ namespace session_group {
    */
   groups_config_t active_groups;
 
+  /**
+   * @brief Parse a window handle string into a numeric HWND value.
+   *
+   * Accepts decimal ("1234") or hexadecimal ("0x4D2") forms. An empty string
+   * yields zero.
+   *
+   * @param value Raw handle text from configuration.
+   * @return Parsed HWND value, or 0 when the text is empty or malformed.
+   */
+  std::uintptr_t parse_hwnd(const std::string &value) {
+    if (value.empty()) {
+      return 0;
+    }
+    try {
+      std::size_t pos = 0;
+      auto parsed = std::stoull(value, &pos, 0);
+      if (pos != value.size()) {
+        return 0;
+      }
+      return static_cast<std::uintptr_t>(parsed);
+    } catch (const std::exception &) {
+      return 0;
+    }
+  }
+
   std::optional<groups_config_t> parse_groups(const std::string_view &json_text) {
     pt::ptree root;
     std::istringstream stream {std::string {json_text}};
@@ -47,6 +72,7 @@ namespace session_group {
       group.name = group_node.get<std::string>("name", "");
       group.capture = group_node.get<std::string>("capture", std::string {CAPTURE_WINDOW});
       group.port = static_cast<std::uint16_t>(group_node.get<int>("port", 0));
+      group.hwnd = parse_hwnd(group_node.get<std::string>("hwnd", ""));
       group.max_fps = group_node.get<int>("max_fps", 60);
       group.bitrate_kbps = group_node.get<int>("bitrate_kbps", 0);
 
@@ -57,6 +83,7 @@ namespace session_group {
           rule.process = rule_node.get<std::string>("process", "");
           rule.title = rule_node.get<std::string>("title", "");
           rule.window_class = rule_node.get<std::string>("class", "");
+          rule.hwnd = parse_hwnd(rule_node.get<std::string>("hwnd", ""));
           if (!rule.empty()) {
             group.rules.emplace_back(std::move(rule));
           }
@@ -124,7 +151,7 @@ namespace session_group {
   }
 
   bool is_cli_option(const std::string_view &name) {
-    return name == "group" || name == "capture" || name == "box" || name == "process" || name == "title" || name == "class" || name == "port" || name == "config";
+    return name == "group" || name == "capture" || name == "box" || name == "process" || name == "title" || name == "class" || name == "hwnd" || name == "port" || name == "config";
   }
 
   bool apply_cli_option(const std::string_view &name, const std::string_view &value, cli_options_t &opts) {
@@ -140,6 +167,8 @@ namespace session_group {
       opts.title = std::string {value};
     } else if (name == "class") {
       opts.window_class = std::string {value};
+    } else if (name == "hwnd") {
+      opts.hwnd = parse_hwnd(std::string {value});
     } else if (name == "port") {
       try {
         auto parsed = std::stoi(std::string {value});
@@ -166,7 +195,7 @@ namespace session_group {
       return load_groups(*opts.config_file);
     }
 
-    const bool has_group_option = !opts.group_name.empty() || !opts.capture.empty() || !opts.box.empty() || !opts.process.empty() || !opts.title.empty() || !opts.window_class.empty() || opts.port.has_value();
+    const bool has_group_option = !opts.group_name.empty() || !opts.capture.empty() || !opts.box.empty() || !opts.process.empty() || !opts.title.empty() || !opts.window_class.empty() || opts.hwnd != 0 || opts.port.has_value();
     if (!has_group_option) {
       return groups_config_t {};
     }
@@ -180,12 +209,14 @@ namespace session_group {
     group.name = opts.group_name;
     group.capture = opts.capture.empty() ? std::string {CAPTURE_WINDOW} : opts.capture;
     group.port = opts.port.value_or(0);
+    group.hwnd = opts.hwnd;
 
     window_rule_t rule;
     rule.box = opts.box;
     rule.process = opts.process;
     rule.title = opts.title;
     rule.window_class = opts.window_class;
+    rule.hwnd = opts.hwnd;
     if (!rule.empty()) {
       group.rules.emplace_back(std::move(rule));
     }

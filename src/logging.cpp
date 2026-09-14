@@ -279,6 +279,7 @@ namespace logging {
       << "        --process <name>    | process name matching rule"sv << std::endl
       << "        --title <pattern>   | window title wildcard matching rule"sv << std::endl
       << "        --class <name>      | window class name matching rule"sv << std::endl
+      << "        --hwnd <handle>     | direct Win32 window handle (decimal or 0x hex)"sv << std::endl
       << "        --port <number>     | Moonlight port for the session group"sv << std::endl
       << "        --config <path>     | load session groups from a JSON file"sv << std::endl
       << std::endl

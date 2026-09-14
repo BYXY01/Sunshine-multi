@@ -84,6 +84,47 @@ TEST_F(SessionGroupTest, ParsesValidGroupConfiguration) {
   EXPECT_EQ(second.rules.size(), 1);
 }
 
+TEST(SessionGroupParseHwndTest, ParsesDecimalAndHexadecimalHandles) {
+  EXPECT_EQ(session_group::parse_hwnd(""), 0);
+  EXPECT_EQ(session_group::parse_hwnd("0"), 0);
+  EXPECT_EQ(session_group::parse_hwnd("1234"), 1234);
+  EXPECT_EQ(session_group::parse_hwnd("0x4D2"), 0x4D2);
+  EXPECT_EQ(session_group::parse_hwnd("not-a-handle"), 0);
+  EXPECT_EQ(session_group::parse_hwnd("1234junk"), 0);
+}
+
+TEST_F(SessionGroupTest, ParsesGroupLevelHwnd) {
+  auto groups = session_group::parse_groups(R"({
+    "session_groups": [
+      {"name": "hwnd-group", "capture": "window", "port": 48010, "hwnd": "0x4D2"}
+    ]
+  })"sv);
+  ASSERT_TRUE(groups.has_value());
+  ASSERT_EQ(groups->groups.size(), 1);
+  EXPECT_EQ(groups->groups[0].hwnd, 0x4D2);
+  EXPECT_TRUE(groups->groups[0].is_window_capture());
+}
+
+TEST_F(SessionGroupTest, ParsesHwndRule) {
+  auto groups = session_group::parse_groups(R"({
+    "session_groups": [
+      {"name": "hwnd-rule", "capture": "window", "port": 48010,
+       "rules": [{"hwnd": "9999"}, {"process": "fallback.exe"}]}
+    ]
+  })"sv);
+  ASSERT_TRUE(groups.has_value());
+  ASSERT_EQ(groups->groups.size(), 1);
+  ASSERT_EQ(groups->groups[0].rules.size(), 2);
+  EXPECT_EQ(groups->groups[0].rules[0].hwnd, 9999);
+  EXPECT_EQ(groups->groups[0].rules[1].process, "fallback.exe");
+}
+
+TEST(SessionGroupHwndRuleTest, HwndRuleIsNotEmpty) {
+  session_group::window_rule_t rule;
+  rule.hwnd = 1234;
+  EXPECT_FALSE(rule.empty());
+}
+
 TEST_F(SessionGroupTest, RejectsMalformedJson) {
   EXPECT_FALSE(session_group::parse_groups("this is not json"sv).has_value());
   EXPECT_FALSE(session_group::parse_groups(""sv).has_value());
@@ -203,6 +244,7 @@ TEST(SessionGroupCliTest, RecognizesGroupOptions) {
   EXPECT_TRUE(session_group::is_cli_option("process"));
   EXPECT_TRUE(session_group::is_cli_option("title"));
   EXPECT_TRUE(session_group::is_cli_option("class"));
+  EXPECT_TRUE(session_group::is_cli_option("hwnd"));
   EXPECT_TRUE(session_group::is_cli_option("port"));
   EXPECT_TRUE(session_group::is_cli_option("config"));
   EXPECT_FALSE(session_group::is_cli_option("help"));
@@ -217,6 +259,7 @@ TEST(SessionGroupCliTest, AppliesValidOptions) {
   EXPECT_TRUE(session_group::apply_cli_option("process", "notepad.exe", opts));
   EXPECT_TRUE(session_group::apply_cli_option("title", "Notepad*", opts));
   EXPECT_TRUE(session_group::apply_cli_option("class", "#32770", opts));
+  EXPECT_TRUE(session_group::apply_cli_option("hwnd", "0x4D2", opts));
   EXPECT_TRUE(session_group::apply_cli_option("port", "48010", opts));
   EXPECT_TRUE(session_group::apply_cli_option("config", "session-groups.json", opts));
 
@@ -226,6 +269,7 @@ TEST(SessionGroupCliTest, AppliesValidOptions) {
   EXPECT_EQ(opts.process, "notepad.exe");
   EXPECT_EQ(opts.title, "Notepad*");
   EXPECT_EQ(opts.window_class, "#32770");
+  EXPECT_EQ(opts.hwnd, 0x4D2);
   ASSERT_TRUE(opts.port.has_value());
   EXPECT_EQ(*opts.port, 48010);
   ASSERT_TRUE(opts.config_file.has_value());
@@ -262,6 +306,23 @@ TEST(SessionGroupCliTest, BuildsSingleGroupFromOptions) {
   EXPECT_EQ(group.port, 48010);
   ASSERT_EQ(group.rules.size(), 1);
   EXPECT_EQ(group.rules[0].box, "cap_u1_notepad");
+}
+
+TEST(SessionGroupCliTest, BuildsGroupWithHwnd) {
+  session_group::cli_options_t opts;
+  opts.group_name = "hwnd-group";
+  opts.hwnd = 0x4D2;
+  opts.port = 48010;
+
+  auto groups = session_group::groups_from_cli(opts);
+  ASSERT_TRUE(groups.has_value());
+  ASSERT_EQ(groups->groups.size(), 1);
+
+  const auto &group = groups->groups[0];
+  EXPECT_EQ(group.name, "hwnd-group");
+  EXPECT_EQ(group.hwnd, 0x4D2);
+  ASSERT_EQ(group.rules.size(), 1);
+  EXPECT_EQ(group.rules[0].hwnd, 0x4D2);
 }
 
 TEST(SessionGroupCliTest, RequiresGroupNameWhenOptionsPresent) {

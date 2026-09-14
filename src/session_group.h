@@ -29,6 +29,7 @@ namespace session_group {
     std::string process;  ///< Process executable name match.
     std::string title;  ///< Window title wildcard match.
     std::string window_class;  ///< Window class name match.
+    std::uintptr_t hwnd {0};  ///< Direct Win32 window handle (HWND) match, highest priority.
 
     /**
      * @brief Check whether every field is empty.
@@ -36,7 +37,7 @@ namespace session_group {
      * @return True when the rule carries no matching criteria.
      */
     [[nodiscard]] bool empty() const {
-      return box.empty() && process.empty() && title.empty() && window_class.empty();
+      return box.empty() && process.empty() && title.empty() && window_class.empty() && hwnd == 0;
     }
   };
 
@@ -53,11 +54,21 @@ namespace session_group {
     std::string name;  ///< Unique session group name.
     std::string capture {CAPTURE_WINDOW};  ///< Capture backend: `window` or `monitor`.
     std::uint16_t port {0};  ///< Moonlight TCP port used by this group.
+    std::uintptr_t hwnd {0};  ///< Direct Win32 window handle to capture; overrides all rules when non-zero.
     std::vector<window_rule_t> rules;  ///< Window matching rules (OR).
     std::vector<std::string> aux_include;  ///< Auxiliary window classes always composited (e.g. menus/dialogs).
     std::vector<std::string> aux_exclude;  ///< Auxiliary window classes filtered from the frame.
     int max_fps {60};  ///< Maximum capture framerate.
     int bitrate_kbps {0};  ///< Stream bitrate in kbps; 0 leaves the client to decide.
+
+    /**
+     * @brief Check whether this group uses the window compositing backend.
+     *
+     * @return True when the capture backend is `window`.
+     */
+    [[nodiscard]] bool is_window_capture() const {
+      return capture == CAPTURE_WINDOW;
+    }
   };
 
   /**
@@ -103,6 +114,14 @@ namespace session_group {
   std::vector<std::string> validate_groups(const groups_config_t &groups);
 
   /**
+   * @brief Parse a window handle string into a numeric HWND value.
+   *
+   * @param value Raw handle text from configuration.
+   * @return Parsed HWND value, or 0 when the text is empty or malformed.
+   */
+  std::uintptr_t parse_hwnd(const std::string &value);
+
+  /**
    * @brief Accumulated command-line session group options.
    */
   struct cli_options_t {
@@ -112,6 +131,7 @@ namespace session_group {
     std::string process;  ///< Value of `--process`.
     std::string title;  ///< Value of `--title`.
     std::string window_class;  ///< Value of `--class`.
+    std::uintptr_t hwnd {0};  ///< Value of `--hwnd`.
     std::optional<std::uint16_t> port;  ///< Value of `--port`.
     std::optional<std::filesystem::path> config_file;  ///< Value of `--config`.
   };
