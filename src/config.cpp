@@ -27,6 +27,7 @@
 #include "nvhttp.h"
 #include "platform/common.h"
 #include "rtsp.h"
+#include "session_group.h"
 #include "utility.h"
 
 #ifdef _WIN32
@@ -1958,6 +1959,7 @@ namespace config {
     bool shortcut_launch = false;
     bool service_admin_launch = false;
 #endif
+    session_group::cli_options_t session_group_cli;
 
     for (auto x = 1; x < argc; ++x) {
       auto line = argv[x];
@@ -1973,7 +1975,26 @@ namespace config {
         service_admin_launch = true;
       }
 #endif
-      else if (*line == '-') {
+      else if (line[0] == '-' && line[1] == '-') {
+        auto option = std::string_view {line + 2};
+        if (session_group::is_cli_option(option)) {
+          if (x + 1 >= argc) {
+            BOOST_LOG(error) << "config: missing value for option [--"sv << option << ']';
+            logging::print_help(*argv);
+            return -1;
+          }
+
+          if (!session_group::apply_cli_option(option, argv[x + 1], session_group_cli)) {
+            logging::print_help(*argv);
+            return -1;
+          }
+
+          ++x;
+          continue;
+        }
+      }
+
+      if (*line == '-') {
         if (*(line + 1) == '-') {
           sunshine.cmd.name = line + 2;
           sunshine.cmd.argc = argc - x - 1;
@@ -2036,6 +2057,24 @@ namespace config {
       BOOST_LOG(fatal) << "Failed to apply config: "sv << err.what();
     } catch (const boost::filesystem::filesystem_error &err) {
       BOOST_LOG(fatal) << "Failed to apply config: "sv << err.what();
+    }
+
+    // Load and validate the active session groups from CLI options.
+    auto session_groups = session_group::groups_from_cli(session_group_cli);
+    if (!session_groups) {
+      BOOST_LOG(fatal) << "Failed to load session groups configuration"sv;
+      return -1;
+    }
+    auto session_group_errors = session_group::validate_groups(*session_groups);
+    if (!session_group_errors.empty()) {
+      for (const auto &error : session_group_errors) {
+        BOOST_LOG(fatal) << "Invalid session groups configuration: "sv << error;
+      }
+      return -1;
+    }
+    session_group::active_groups = std::move(*session_groups);
+    if (!session_group::active_groups.groups.empty()) {
+      BOOST_LOG(info) << "Loaded "sv << session_group::active_groups.groups.size() << " session group(s)"sv;
     }
 
 #ifdef _WIN32

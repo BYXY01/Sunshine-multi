@@ -272,6 +272,16 @@ namespace logging {
       << "    --creds username password | set user credentials for the Web manager"sv << std::endl
       << "    --version                 | print the version of sunshine"sv << std::endl
       << std::endl
+      << "    session groups"sv << std::endl
+      << "        --group <name>      | name of a single session group"sv << std::endl
+      << "        --capture <backend> | capture backend: window or monitor"sv << std::endl
+      << "        --box <name>        | Sandboxie box name matching rule"sv << std::endl
+      << "        --process <name>    | process name matching rule"sv << std::endl
+      << "        --title <pattern>   | window title wildcard matching rule"sv << std::endl
+      << "        --class <name>      | window class name matching rule"sv << std::endl
+      << "        --port <number>     | Moonlight port for the session group"sv << std::endl
+      << "        --config <path>     | load session groups from a JSON file"sv << std::endl
+      << std::endl
       << "    flags"sv << std::endl
       << "        -0 | Read PIN from stdin"sv << std::endl
       << "        -1 | Do not load previously saved state and do retain any state after shutdown"sv << std::endl
