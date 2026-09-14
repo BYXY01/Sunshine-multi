@@ -5,6 +5,9 @@
 // platform includes
 #include <dxgi1_2.h>
 
+// standard includes
+#include <mutex>
+
 // local includes
 #include "display.h"
 #include "misc.h"
@@ -422,23 +425,24 @@ namespace platf::dxgi {
     return dup.release_frame();
   }
 
-  int display_window_t::init(const ::video::config_t &config, const std::string &display_name, HWND hwnd) {
-    HRESULT status;
+  /**
+   * @brief Initialize the D3D11 device, factory, and adapter for window capture.
+   *
+   * Window capture has no DXGI output to enumerate, so this shared helper
+   * builds the capture device directly, applies COM and DPI awareness, and
+   * records the client-requested frame rate. Shared by the RAM and VRAM
+   * window backends.
+   *
+   * @param display Display base to populate.
+   * @param config Configuration values to apply.
+   * @return 0 on success; nonverbal/negative platform status on failure.
+   */
+  int init_window_device(display_base_t *display, const ::video::config_t &config) {
+    // COM and DPI awareness only need to be applied once per process.
+    static std::once_flag once;
+    std::call_once(once, []() {
+      CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
-    // WGC window capture requires a COM apartment on the calling thread.
-    // Calling CoInitializeEx repeatedly on an already-initialized thread is
-    // a no-op (returns S_FALSE / RPC_E_CHANGED_MODE), so this is safe even
-    // when the host process has already initialized COM.
-    auto com_hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    if (FAILED(com_hr) && com_hr != RPC_E_CHANGED_MODE) {
-      BOOST_LOG(error) << "Window capture: CoInitializeEx failed [0x"sv << util::hex(com_hr).to_string_view() << ']';
-      return -1;
-    }
-
-    // WGC reports window coordinates and frame sizes in physical pixels when
-    // the process is DPI aware. Without this, window capture may deliver
-    // wrong-sized or no frames depending on the process DPI context.
-    {
       DECLARE_HANDLE(DPI_AWARENESS_CONTEXT);
       typedef BOOL (*User32_SetProcessDpiAwarenessContext)(DPI_AWARENESS_CONTEXT value);
 
@@ -450,12 +454,14 @@ namespace platf::dxgi {
         }
         FreeLibrary(user32);
       }
-    }
+    });
 
-    env_width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    env_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    HRESULT status;
 
-    status = CreateDXGIFactory1(IID_IDXGIFactory1, (void **) &factory);
+    display->env_width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    display->env_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+    status = CreateDXGIFactory1(IID_IDXGIFactory1, (void **) &display->factory);
     if (FAILED(status)) {
       BOOST_LOG(error) << "Window capture: failed to create DXGIFactory1 [0x"sv << util::hex(status).to_string_view() << ']';
       return -1;
@@ -463,7 +469,7 @@ namespace platf::dxgi {
 
     auto adapter_name = utf_utils::from_utf8(config::video.adapter_name);
     adapter_t::pointer adapter_p;
-    for (int x = 0; factory->EnumAdapters1(x, &adapter_p) != DXGI_ERROR_NOT_FOUND; ++x) {
+    for (int x = 0; display->factory->EnumAdapters1(x, &adapter_p) != DXGI_ERROR_NOT_FOUND; ++x) {
       dxgi::adapter_t adapter_tmp {adapter_p};
       DXGI_ADAPTER_DESC1 adapter_desc;
       adapter_tmp->GetDesc1(&adapter_desc);
@@ -472,11 +478,11 @@ namespace platf::dxgi {
         continue;
       }
 
-      adapter = std::move(adapter_tmp);
+      display->adapter = std::move(adapter_tmp);
       break;
     }
 
-    if (!adapter) {
+    if (!display->adapter) {
       BOOST_LOG(error) << "Window capture: failed to locate an adapter"sv;
       return -1;
     }
@@ -491,7 +497,7 @@ namespace platf::dxgi {
       D3D_FEATURE_LEVEL_9_1
     };
 
-    status = adapter->QueryInterface(IID_IDXGIAdapter, (void **) &adapter_p);
+    status = display->adapter->QueryInterface(IID_IDXGIAdapter, (void **) &adapter_p);
     if (FAILED(status)) {
       BOOST_LOG(error) << "Window capture: failed to query IDXGIAdapter interface"sv;
       return -1;
@@ -505,9 +511,9 @@ namespace platf::dxgi {
       featureLevels,
       sizeof(featureLevels) / sizeof(D3D_FEATURE_LEVEL),
       D3D11_SDK_VERSION,
-      &device,
-      &feature_level,
-      &device_ctx
+      &display->device,
+      &display->feature_level,
+      &display->device_ctx
     );
 
     adapter_p->Release();
@@ -517,11 +523,19 @@ namespace platf::dxgi {
       return -1;
     }
 
-    client_frame_rate = config.framerate;
-    client_frame_rate_strict = {0, 0};
+    display->client_frame_rate = config.framerate;
+    display->client_frame_rate_strict = {0, 0};
     if (config.framerateX100 > 0) {
       const AVRational fps = ::video::framerate_to_rational(config);
-      client_frame_rate_strict = DXGI_RATIONAL {static_cast<UINT>(fps.num), static_cast<UINT>(fps.den)};
+      display->client_frame_rate_strict = DXGI_RATIONAL {static_cast<UINT>(fps.num), static_cast<UINT>(fps.den)};
+    }
+
+    return 0;
+  }
+
+  int display_window_t::init(const ::video::config_t &config, const std::string &display_name, HWND hwnd) {
+    if (init_window_device(this, config)) {
+      return -1;
     }
 
     if (wgc.init_window(this, config, hwnd)) {

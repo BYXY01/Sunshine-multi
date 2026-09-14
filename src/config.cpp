@@ -2081,13 +2081,8 @@ namespace config {
           config::video.capture = std::string {session_group::CAPTURE_WINDOW};
           BOOST_LOG(info) << "Enabled window capture backend"sv;
         }
-        // Window capture exposes a RAM-backed display, so only the software
-        // encoder can consume it. Skip hardware encoder probing unless the
-        // user explicitly requested a specific encoder.
-        if (config::video.encoder.empty()) {
-          config::video.encoder = "software";
-          BOOST_LOG(info) << "Window capture: selected software encoder"sv;
-        }
+        // Window capture supports both software (RAM) and hardware (VRAM)
+        // encoders; the display factory chooses the backend per encoder.
       }
     }
 

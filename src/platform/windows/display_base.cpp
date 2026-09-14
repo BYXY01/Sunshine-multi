@@ -1016,11 +1016,8 @@ namespace platf {
    */
   std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config, const std::string_view &group_name) {
     if (config::video.capture == "window") {
-      HWND target_hwnd = nullptr;
-
       // Prefer the group identified by group_name, then fall back to the first
-      // window group. Within a group, prefer a group-level HWND, then the first
-      // rule with an HWND.
+      // window group.
       const session_group::config_t *selected_group = nullptr;
       for (const auto &group : session_group::active_groups.groups) {
         if (!group.is_window_capture()) {
@@ -1033,27 +1030,29 @@ namespace platf {
         break;
       }
 
-      if (selected_group) {
-        if (selected_group->hwnd != 0) {
-          target_hwnd = (HWND) selected_group->hwnd;
-        } else {
-          for (const auto &rule : selected_group->rules) {
-            if (rule.hwnd != 0) {
-              target_hwnd = (HWND) rule.hwnd;
-              break;
-            }
-          }
-        }
-      }
-
-      if (!target_hwnd) {
-        BOOST_LOG(error) << "Window capture requested but no HWND was provided. Add a \"hwnd\" field to the session group or use --hwnd."sv;
+      if (!selected_group) {
+        BOOST_LOG(error) << "Window capture requested but no matching session group was configured"sv;
         return nullptr;
       }
 
-      auto disp = std::make_shared<dxgi::display_window_t>();
-      if (!disp->init(config, display_name, target_hwnd)) {
-        return disp;
+      auto target_hwnd = session_group::match_window_hwnd(*selected_group);
+      if (!target_hwnd) {
+        BOOST_LOG(error) << "Window capture group ["sv << selected_group->name << "] matched no window"sv;
+        return nullptr;
+      }
+
+      // Hardware encoders consume the GPU-backed window backend; software
+      // encoders use the RAM backend (no GPU->CPU staging for hardware).
+      if (hwdevice_type == mem_type_e::dxgi) {
+        auto disp = std::make_shared<dxgi::display_window_vram_t>();
+        if (!disp->init(config, display_name, (HWND) target_hwnd)) {
+          return disp;
+        }
+      } else {
+        auto disp = std::make_shared<dxgi::display_window_t>();
+        if (!disp->init(config, display_name, (HWND) target_hwnd)) {
+          return disp;
+        }
       }
       return nullptr;
     }

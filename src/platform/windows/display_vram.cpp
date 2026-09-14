@@ -1908,6 +1908,85 @@ namespace platf::dxgi {
     return 0;
   }
 
+  int display_window_vram_t::init(const ::video::config_t &config, const std::string &display_name, HWND hwnd) {
+    if (init_window_device(this, config)) {
+      return -1;
+    }
+
+    if (wgc.init_window(this, config, hwnd)) {
+      return -1;
+    }
+
+    this->hwnd = hwnd;
+
+    // Window capture has no rotation, so the pre-rotation dimensions match
+    // the capture dimensions used by the VRAM image pool.
+    width_before_rotation = width;
+    height_before_rotation = height;
+
+    BOOST_LOG(info) << "Window capture initialized (vram): ["sv << width << 'x' << height << "] hwnd=0x"sv << util::hex((std::uintptr_t) hwnd).to_string_view();
+    return 0;
+  }
+
+  capture_e display_window_vram_t::snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) {
+    // If the captured window has been destroyed, stop the session.
+    if (!IsWindow(hwnd)) {
+      BOOST_LOG(warning) << "Window capture: captured window was closed, stopping stream"sv;
+      return capture_e::error;
+    }
+
+    texture2d_t src;
+    uint64_t frame_qpc;
+    wgc.set_cursor_visible(cursor_visible);
+    auto capture_status = wgc.next_frame(timeout, &src, frame_qpc);
+    if (capture_status != capture_e::ok) {
+      return capture_status;
+    }
+
+    auto frame_timestamp = std::chrono::steady_clock::now() - qpc_time_difference(qpc_counter(), frame_qpc);
+    D3D11_TEXTURE2D_DESC desc;
+    src->GetDesc(&desc);
+
+    if (desc.Width != width_before_rotation || desc.Height != height_before_rotation) {
+      BOOST_LOG(info) << "Window capture size changed ["sv << width << 'x' << height << " -> "sv << desc.Width << 'x' << desc.Height << ']';
+      return capture_e::reinit;
+    }
+    if (capture_format != desc.Format) {
+      BOOST_LOG(info) << "Window capture format changed ["sv << dxgi_format_to_string(capture_format) << " -> "sv << dxgi_format_to_string(desc.Format) << ']';
+      return capture_e::reinit;
+    }
+
+    std::shared_ptr<platf::img_t> img;
+    if (!pull_free_image_cb(img)) {
+      return capture_e::interrupted;
+    }
+
+    auto d3d_img = std::static_pointer_cast<img_d3d_t>(img);
+    d3d_img->blank = false;
+    if (complete_img(d3d_img.get(), false) == 0) {
+      texture_lock_helper lock_helper(d3d_img->capture_mutex.get());
+      if (lock_helper.lock()) {
+        device_ctx->CopyResource(d3d_img->capture_texture.get(), src.get());
+      } else {
+        BOOST_LOG(error) << "Window capture: failed to lock capture texture"sv;
+        return capture_e::error;
+      }
+    } else {
+      return capture_e::error;
+    }
+
+    img_out = img;
+    if (img_out) {
+      img_out->frame_timestamp = frame_timestamp;
+    }
+
+    return capture_e::ok;
+  }
+
+  capture_e display_window_vram_t::release_snapshot() {
+    return wgc.release_frame();
+  }
+
   std::shared_ptr<platf::img_t> display_vram_t::alloc_img() {
     auto img = std::make_shared<img_d3d_t>();
 

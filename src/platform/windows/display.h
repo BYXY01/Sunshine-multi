@@ -22,6 +22,20 @@
 namespace platf::dxgi {
   extern const char *format_str[];
 
+  class display_base_t;
+
+  /**
+   * @brief Initialize the D3D11 device/factory/adapter used by window capture.
+   *
+   * Shared by the RAM and VRAM window backends. Window capture has no DXGI
+   * output to enumerate, so the device is built directly.
+   *
+   * @param display Display base to populate.
+   * @param config Configuration values to apply.
+   * @return 0 on success; nonzero/negative platform status on failure.
+   */
+  int init_window_device(display_base_t *display, const ::video::config_t &config);
+
   // Add D3D11_CREATE_DEVICE_DEBUG here to enable the D3D11 debug runtime.
   // You should have a debugger like WinDbg attached to receive debug messages.
   auto constexpr D3D11_CREATE_DEVICE_FLAGS = 0;  ///< Protocol or platform constant for d3 d11 create device flags.
@@ -852,6 +866,69 @@ namespace platf::dxgi {
   public:
     /**
      * @brief Initialize window capture for the given handle.
+     *
+     * @param config Configuration values to apply.
+     * @param display_name Display name.
+     * @param hwnd Win32 window handle to capture.
+     * @return 0 on success; nonzero or negative platform status on failure.
+     */
+    int init(const ::video::config_t &config, const std::string &display_name, HWND hwnd);
+    /**
+     * @brief Capture a window frame into the provided image object.
+     *
+     * @param pull_free_image_cb Callback that provides an available image buffer.
+     * @param img_out Captured image buffer returned to the streaming pipeline.
+     * @param timeout Maximum time to wait for the operation.
+     * @param cursor_visible Cursor visible.
+     * @return Capture status reported to the streaming pipeline.
+     */
+    capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) override;
+    /**
+     * @brief Release resources associated with the last captured snapshot.
+     *
+     * @return Capture status after releasing the current snapshot.
+     */
+    capture_e release_snapshot() override;
+
+    /**
+     * @brief Report whether the captured window is HDR.
+     *
+     * Window capture carries no display output, so HDR is never reported.
+     *
+     * @return False.
+     */
+    bool is_hdr() override {
+      return false;
+    }
+
+    /**
+     * @brief Read HDR metadata for the captured window.
+     *
+     * Window capture carries no display output, so no HDR metadata exists.
+     *
+     * @param metadata Output structure populated with HDR metadata.
+     * @return False.
+     */
+    bool get_hdr_metadata(SS_HDR_METADATA &metadata) override {
+      std::memset(&metadata, 0, sizeof(metadata));
+      return false;
+    }
+  };
+
+  /**
+   * @brief GPU-backed window capture backend (hardware-encoded frames).
+   *
+   * Same as `display_window_t` but keeps frames on the GPU: the WGC capture
+   * texture is copied into a shared D3D11 texture that NVENC consumes
+   * directly, avoiding the GPU->CPU round trip used by the RAM backend.
+   */
+  class display_window_vram_t: public display_vram_t {
+    wgc_capture_t wgc;  ///< WGC window capture session.
+    HWND hwnd {nullptr};  ///< Window handle being captured; null after the window closes.
+
+  public:
+    /**
+     * @brief Initialize GPU window capture for the given handle.
      *
      * @param config Configuration values to apply.
      * @param display_name Display name.
