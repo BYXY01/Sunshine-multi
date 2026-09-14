@@ -171,13 +171,10 @@ namespace platf::dxgi {
       return -1;
     }
 
-    // WGC does not deliver frames for minimized windows. Restore the window
-    // before creating the capture item so the OS composites its content.
-    if (IsIconic(hwnd)) {
-      BOOST_LOG(info) << "Window capture: restoring minimized window"sv;
-      ShowWindow(hwnd, SW_RESTORE);
-    }
-    SetForegroundWindow(hwnd);
+    // Do not automatically restore or foreground the window: stealing focus
+    // would fight other groups and interrupt the user. A minimized window
+    // simply yields no WGC frames (capture times out and waits) until the
+    // user brings it forward.
 
     uwp_device = d3d_comhandle.as<winrt::IDirect3DDevice>();
 
