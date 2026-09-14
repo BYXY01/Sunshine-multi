@@ -399,3 +399,39 @@ TEST(SessionGroupResolveActiveTest, ReturnsEmptyForMultipleWindowGroups) {
 
   EXPECT_TRUE(session_group::resolve_active_window_group().empty());
 }
+
+TEST(SessionGroupMatcherTest, GroupLevelHwndWinsImmediately) {
+  session_group::config_t group;
+  group.capture = std::string {session_group::CAPTURE_WINDOW};
+  group.hwnd = 0x1234;
+
+  EXPECT_EQ(session_group::match_window_hwnd(group), 0x1234);
+}
+
+TEST(SessionGroupMatcherTest, RuleLevelHwndWinsWhenGroupHasNone) {
+  session_group::config_t group;
+  group.capture = std::string {session_group::CAPTURE_WINDOW};
+
+  session_group::window_rule_t rule;
+  rule.hwnd = 0x5678;
+  group.rules.emplace_back(rule);
+
+  EXPECT_EQ(session_group::match_window_hwnd(group), 0x5678);
+}
+
+TEST(SessionGroupMatcherTest, ReturnsZeroForNonWindowGroup) {
+  session_group::config_t group;
+  group.capture = std::string {session_group::CAPTURE_MONITOR};
+  group.hwnd = 0x1234;
+
+  EXPECT_EQ(session_group::match_window_hwnd(group), 0);
+}
+
+TEST(SessionGroupMatcherTest, InvalidWindowNeverMatchesEmptyRules) {
+  // An invalid handle cannot match a group whose rules carry no criteria.
+  session_group::config_t group;
+  group.capture = std::string {session_group::CAPTURE_WINDOW};
+
+  EXPECT_FALSE(session_group::match_window(group, 0xDEADBEEF));
+  EXPECT_FALSE(session_group::match_window(group, 0));
+}

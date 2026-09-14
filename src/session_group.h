@@ -177,4 +177,34 @@ namespace session_group {
    */
   std::string resolve_active_window_group();
 
+  /**
+   * @brief Match a single top-level window against a group's rules.
+   *
+   * The window belongs to the group when any rule matches it (OR semantics).
+   * A rule matches when the window handle equals the rule's hwnd, or the
+   * process name matches `process`, or the window title matches `title`, or
+   * the window class matches `class`. The `box` field is intentionally not
+   * implemented here: the cloudapp consumer resolves Sandboxie boxes into
+   * explicit hwnd/process rules before reaching Sunshine.
+   *
+   * @param group Session group rules to test against.
+   * @param hwnd Window handle to evaluate.
+   * @return True when the window belongs to the group.
+   */
+  bool match_window(const config_t &group, std::uintptr_t hwnd);
+
+  /**
+   * @brief Find the best matching HWND for a window-capture group.
+   *
+   * An explicit group-level or rule-level hwnd wins immediately. Otherwise
+   * visible top-level windows are enumerated: windows whose class appears in
+   * `aux_exclude` are skipped, and among the remaining matches the window with
+   * the largest area (the main window) is returned. Returns 0 when the group
+   * is not a window group or no window matches.
+   *
+   * @param group Session group to resolve.
+   * @return Matching HWND, or 0 when none matches.
+   */
+  std::uintptr_t match_window_hwnd(const config_t &group);
+
 }  // namespace session_group

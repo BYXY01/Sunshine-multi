@@ -3,9 +3,19 @@
  * @brief Definitions for multi-session window capture groups.
  */
 // standard includes
+#include <algorithm>
+#include <cctype>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <string>
 #include <unordered_set>
+#include <vector>
+
+#ifdef _WIN32
+  #include <windows.h>
+  #include <psapi.h>
+#endif
 
 // lib includes
 #include <boost/property_tree/json_parser.hpp>
@@ -14,6 +24,7 @@
 // local includes
 #include "logging.h"
 #include "session_group.h"
+#include "utility.h"
 
 using namespace std::literals;
 
@@ -240,6 +251,289 @@ namespace session_group {
       active = group.name;
     }
     return active;
+  }
+
+#ifdef _WIN32
+
+  /**
+   * @brief Convert a wide string to UTF-8 with ASCII-only lowercasing.
+   *
+   * Non-ASCII code points are preserved verbatim (UTF-8 encoded) rather than
+   * truncated to a single byte, so Chinese/Japanese titles and class names
+   * survive the comparison pipeline. Only ASCII letters are lowercased.
+   *
+   * @param wide Wide string to convert.
+   * @return UTF-8 string with ASCII letters lowercased; empty on conversion failure.
+   */
+  std::string to_utf8_lower(const std::wstring &wide) {
+    if (wide.empty()) {
+      return {};
+    }
+    int size = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
+    if (size <= 0) {
+      return {};
+    }
+    std::string result(static_cast<std::size_t>(size), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), result.data(), size, nullptr, nullptr);
+    for (auto &c : result) {
+      if (static_cast<unsigned char>(c) < 0x80) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      }
+    }
+    return result;
+  }
+
+  /**
+   * @brief Lowercase ASCII characters in a UTF-8 string in place.
+   *
+   * Used to normalize configured class names (e.g. `aux_exclude` entries)
+   * before comparing them against the lowercased window class name.
+   *
+   * @param s String to normalize.
+   * @return The normalized string.
+   */
+  std::string to_ascii_lower(std::string s) {
+    for (auto &c : s) {
+      if (static_cast<unsigned char>(c) < 0x80) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      }
+    }
+    return s;
+  }
+
+  /**
+   * @brief Return the ASCII-lowercased UTF-8 executable name (basename) of a window's process.
+   *
+   * @param hwnd Window handle.
+   * @return Lowercased process executable name, or empty when unavailable.
+   */
+  std::string window_process_name(HWND hwnd) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == 0) {
+      return {};
+    }
+
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) {
+      return {};
+    }
+
+    auto close = util::fail_guard([&]() {
+      CloseHandle(process);
+    });
+
+    std::wstring image_path(MAX_PATH, L'\0');
+    DWORD size = static_cast<DWORD>(image_path.size());
+    if (!QueryFullProcessImageNameW(process, 0, image_path.data(), &size)) {
+      return {};
+    }
+    image_path.resize(size);
+
+    auto name = std::filesystem::path {image_path}.filename().wstring();
+    return to_utf8_lower(name);
+  }
+
+  /**
+   * @brief Return the lowercased class name of a window.
+   *
+   * @param hwnd Window handle.
+   * @return Lowercased class name, or empty when unavailable.
+   */
+  std::string window_class_name(HWND hwnd) {
+    std::wstring class_name(256, L'\0');
+    int len = GetClassNameW(hwnd, class_name.data(), static_cast<int>(class_name.size()));
+    if (len == 0) {
+      return {};
+    }
+    class_name.resize(static_cast<std::size_t>(len));
+
+    return to_utf8_lower(class_name);
+  }
+
+  /**
+   * @brief Return the lowercased window title.
+   *
+   * @param hwnd Window handle.
+   * @return Lowercased window title, or empty when unavailable.
+   */
+  std::string window_title(HWND hwnd) {
+    auto length = GetWindowTextLengthW(hwnd);
+    if (length == 0) {
+      return {};
+    }
+
+    std::wstring title(static_cast<std::size_t>(length) + 1, L'\0');
+    GetWindowTextW(hwnd, title.data(), length + 1);
+    title.resize(static_cast<std::size_t>(length));
+
+    return to_utf8_lower(title);
+  }
+
+  /**
+   * @brief Check whether a window title contains a search term (fuzzy).
+   *
+   * Substring, space-stripped substring, and word-based matches are tried,
+   * mirroring the window-title matching approach used by the reference
+   * implementation.
+   *
+   * @param title Lowercased window title.
+   * @param search Lowercased search term.
+   * @return True when the title matches the search term.
+   */
+  bool title_matches(const std::string &title, const std::string &search) {
+    if (search.empty()) {
+      return false;
+    }
+    if (title.find(search) != std::string::npos) {
+      return true;
+    }
+
+    auto strip_spaces = [](std::string s) {
+      s.erase(std::remove_if(s.begin(), s.end(), [](unsigned char c) { return std::isspace(c); }), s.end());
+      return s;
+    };
+
+    if (strip_spaces(title).find(strip_spaces(search)) != std::string::npos) {
+      return true;
+    }
+
+    // Word-based: every search word (length >= 2) must appear in the title.
+    std::istringstream stream {search};
+    std::string word;
+    bool any_word = false;
+    while (stream >> word) {
+      if (word.size() < 2) {
+        continue;
+      }
+      any_word = true;
+      if (title.find(word) == std::string::npos) {
+        return false;
+      }
+    }
+    return any_word;
+  }
+
+  /**
+   * @brief Test whether a single rule matches a window.
+   *
+   * A rule matches when the window handle equals the rule's hwnd, or the
+   * process name matches, or the title matches, or the class matches. The
+   * box field is intentionally ignored (resolved by the consumer).
+   *
+   * @param rule Rule to test.
+   * @param hwnd Window handle.
+   * @param process_name Cached process name of the window.
+   * @param title Cached window title.
+   * @param class_name Cached class name of the window.
+   * @return True when the rule matches.
+   */
+  bool rule_matches(const window_rule_t &rule, std::uintptr_t hwnd, const std::string &process_name, const std::string &title, const std::string &class_name) {
+    if (rule.hwnd != 0 && rule.hwnd == hwnd) {
+      return true;
+    }
+    if (!rule.process.empty() && rule.process == process_name) {
+      return true;
+    }
+    if (!rule.title.empty() && title_matches(title, rule.title)) {
+      return true;
+    }
+    if (!rule.window_class.empty() && rule.window_class == class_name) {
+      return true;
+    }
+    return false;
+  }
+
+#endif  // _WIN32
+
+  bool match_window(const config_t &group, std::uintptr_t hwnd) {
+#ifdef _WIN32
+    if (!group.is_window_capture()) {
+      return false;
+    }
+
+    auto process_name = window_process_name(reinterpret_cast<HWND>(hwnd));
+    auto title = window_title(reinterpret_cast<HWND>(hwnd));
+    auto class_name = window_class_name(reinterpret_cast<HWND>(hwnd));
+
+    for (const auto &rule : group.rules) {
+      if (rule_matches(rule, hwnd, process_name, title, class_name)) {
+        return true;
+      }
+    }
+#endif  // _WIN32
+    return false;
+  }
+
+  std::uintptr_t match_window_hwnd(const config_t &group) {
+#ifdef _WIN32
+    if (!group.is_window_capture()) {
+      return 0;
+    }
+
+    // An explicit handle wins immediately.
+    if (group.hwnd != 0) {
+      return group.hwnd;
+    }
+    for (const auto &rule : group.rules) {
+      if (rule.hwnd != 0) {
+        return rule.hwnd;
+      }
+    }
+
+    // Otherwise enumerate visible top-level windows. Auxiliary window classes
+    // listed in `aux_exclude` are skipped, and the largest matching window is
+    // preferred so that a small popup or menu never wins over the main window.
+    struct enum_ctx_t {
+      const config_t *group;  ///< Group rules to match against.
+      std::vector<std::string> excluded;  ///< Lowercased aux_exclude class names.
+      std::uintptr_t best;  ///< Largest matching HWND found so far.
+      long best_area;  ///< Pixel area of the best match.
+    };
+    std::vector<std::string> excluded;
+    excluded.reserve(group.aux_exclude.size());
+    for (const auto &aux : group.aux_exclude) {
+      excluded.push_back(to_ascii_lower(aux));
+    }
+    enum_ctx_t ctx {&group, std::move(excluded), 0, 0};
+
+    EnumWindows([](HWND hwnd, LPARAM lparam) -> BOOL {
+      auto *data = reinterpret_cast<enum_ctx_t *>(lparam);
+
+      if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) {
+        return TRUE;
+      }
+
+      auto process_name = window_process_name(hwnd);
+      auto title = window_title(hwnd);
+      auto class_name = window_class_name(hwnd);
+
+      if (std::find(data->excluded.begin(), data->excluded.end(), class_name) != data->excluded.end()) {
+        return TRUE;
+      }
+
+      for (const auto &rule : data->group->rules) {
+        if (rule_matches(rule, reinterpret_cast<std::uintptr_t>(hwnd), process_name, title, class_name)) {
+          RECT rect {};
+          GetWindowRect(hwnd, &rect);
+          long area = (static_cast<long>(rect.right) - static_cast<long>(rect.left)) *
+            (static_cast<long>(rect.bottom) - static_cast<long>(rect.top));
+          if (area > data->best_area) {
+            data->best_area = area;
+            data->best = reinterpret_cast<std::uintptr_t>(hwnd);
+          }
+          break;
+        }
+      }
+      return TRUE;
+    },
+      reinterpret_cast<LPARAM>(&ctx));
+
+    return ctx.best;
+#else
+    (void) group;
+    return 0;
+#endif  // _WIN32
   }
 
 }  // namespace session_group
