@@ -192,7 +192,7 @@ TEST_F(SessionGroupTest, ValidatesUniqueNamesAndPorts) {
   EXPECT_NE(std::find(errors.begin(), errors.end(), "duplicate port for session group 'dup': 48010"), errors.end());
 }
 
-TEST_F(SessionGroupTest, ValidatesWindowGroupRequiresRules) {
+TEST_F(SessionGroupTest, ValidatesWindowGroupRequiresRulesOrHwnd) {
   auto groups = session_group::parse_groups(R"({
     "session_groups": [
       {"name": "no-rules", "capture": "window", "port": 48010}
@@ -202,7 +202,23 @@ TEST_F(SessionGroupTest, ValidatesWindowGroupRequiresRules) {
 
   auto errors = session_group::validate_groups(*groups);
   ASSERT_EQ(errors.size(), 1);
-  EXPECT_EQ(errors[0], "window capture group 'no-rules' must define at least one matching rule");
+  EXPECT_EQ(errors[0], "window capture group 'no-rules' must define at least one matching rule or a group-level hwnd");
+
+  auto with_hwnd = session_group::parse_groups(R"({
+    "session_groups": [
+      {"name": "hwnd-ok", "capture": "window", "port": 48010, "hwnd": "0x4D2"}
+    ]
+  })"sv);
+  ASSERT_TRUE(with_hwnd.has_value());
+  EXPECT_TRUE(session_group::validate_groups(*with_hwnd).empty());
+
+  auto with_rule = session_group::parse_groups(R"({
+    "session_groups": [
+      {"name": "rule-ok", "capture": "window", "port": 48010, "rules": [{"process": "x.exe"}]}
+    ]
+  })"sv);
+  ASSERT_TRUE(with_rule.has_value());
+  EXPECT_TRUE(session_group::validate_groups(*with_rule).empty());
 }
 
 TEST_F(SessionGroupTest, ValidatesInvalidCaptureBackend) {

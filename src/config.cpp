@@ -2075,6 +2075,20 @@ namespace config {
     session_group::active_groups = std::move(*session_groups);
     if (!session_group::active_groups.groups.empty()) {
       BOOST_LOG(info) << "Loaded "sv << session_group::active_groups.groups.size() << " session group(s)"sv;
+      // A window capture session group implicitly selects the window capture backend.
+      if (std::ranges::any_of(session_group::active_groups.groups, [](const auto &group) { return group.is_window_capture(); })) {
+        if (config::video.capture.empty()) {
+          config::video.capture = std::string {session_group::CAPTURE_WINDOW};
+          BOOST_LOG(info) << "Enabled window capture backend"sv;
+        }
+        // Window capture exposes a RAM-backed display, so only the software
+        // encoder can consume it. Skip hardware encoder probing unless the
+        // user explicitly requested a specific encoder.
+        if (config::video.encoder.empty()) {
+          config::video.encoder = "software";
+          BOOST_LOG(info) << "Window capture: selected software encoder"sv;
+        }
+      }
     }
 
 #ifdef _WIN32

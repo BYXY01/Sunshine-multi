@@ -142,8 +142,8 @@ namespace session_group {
         errors.emplace_back("duplicate port for session group '" + group.name + "': " + std::to_string(group.port));
       }
 
-      if (group.capture == CAPTURE_WINDOW && group.rules.empty()) {
-        errors.emplace_back("window capture group '" + group.name + "' must define at least one matching rule");
+      if (group.capture == CAPTURE_WINDOW && group.hwnd == 0 && group.rules.empty()) {
+        errors.emplace_back("window capture group '" + group.name + "' must define at least one matching rule or a group-level hwnd");
       }
     }
 

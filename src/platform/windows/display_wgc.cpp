@@ -494,6 +494,7 @@ namespace platf::dxgi {
       return -1;
     }
 
+    BOOST_LOG(info) << "Window capture initialized: ["sv << width << 'x' << height << "] hwnd=0x"sv << util::hex((std::uintptr_t) hwnd).to_string_view();
     texture.reset();
     return 0;
   }

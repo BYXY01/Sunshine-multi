@@ -874,5 +874,29 @@ namespace platf::dxgi {
      * @return Capture status after releasing the current snapshot.
      */
     capture_e release_snapshot() override;
+
+    /**
+     * @brief Report whether the captured window is HDR.
+     *
+     * Window capture carries no display output, so HDR is never reported.
+     *
+     * @return False.
+     */
+    bool is_hdr() override {
+      return false;
+    }
+
+    /**
+     * @brief Read HDR metadata for the captured window.
+     *
+     * Window capture carries no display output, so no HDR metadata exists.
+     *
+     * @param metadata Output structure populated with HDR metadata.
+     * @return False.
+     */
+    bool get_hdr_metadata(SS_HDR_METADATA &metadata) override {
+      std::memset(&metadata, 0, sizeof(metadata));
+      return false;
+    }
   };
 }  // namespace platf::dxgi
