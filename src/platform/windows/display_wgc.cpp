@@ -429,6 +429,23 @@ namespace platf::dxgi {
       return -1;
     }
 
+    // WGC reports window coordinates and frame sizes in physical pixels when
+    // the process is DPI aware. Without this, window capture may deliver
+    // wrong-sized or no frames depending on the process DPI context.
+    {
+      DECLARE_HANDLE(DPI_AWARENESS_CONTEXT);
+      typedef BOOL (*User32_SetProcessDpiAwarenessContext)(DPI_AWARENESS_CONTEXT value);
+
+      auto user32 = LoadLibraryA("user32.dll");
+      if (user32) {
+        auto f = (User32_SetProcessDpiAwarenessContext) GetProcAddress(user32, "SetProcessDpiAwarenessContext");
+        if (f) {
+          f(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
+        FreeLibrary(user32);
+      }
+    }
+
     env_width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
     env_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
 

@@ -138,6 +138,7 @@ namespace {
     config.framerate = 30;
     config.width = 1920;
     config.height = 1080;
+    config.dynamicRange = 0;  // request SDR (BGRA8) capture format
 
     auto disp = std::make_shared<platf::dxgi::display_window_t>();
     if (disp->init(config, "", hwnd) != 0) {
@@ -156,7 +157,7 @@ namespace {
       return true;
     };
 
-    // WGC needs a message pump plus a moment to deliver the first frame.
+    // WGC needs a message pump plus a moment to deliver a non-blank frame.
     auto deadline = std::chrono::steady_clock::now() + 3s;
     platf::capture_e status = platf::capture_e::timeout;
     while (status == platf::capture_e::timeout && std::chrono::steady_clock::now() < deadline) {
@@ -166,6 +167,30 @@ namespace {
         DispatchMessageW(&msg);
       }
 
+      status = disp->snapshot(pull_free_image_cb, img_out, 250ms, false);
+    }
+
+    // Discard the (possibly blank) first frame and keep capturing until the
+    // window content arrives or the deadline expires.
+    while (status == platf::capture_e::ok && img_out && std::chrono::steady_clock::now() < deadline) {
+      const auto *pixels = static_cast<const std::uint8_t *>(img_out->data);
+      const auto byte_count = static_cast<std::size_t>(img_out->height) * img_out->row_pitch;
+      bool blank = true;
+      for (std::size_t i = 0; i < byte_count; ++i) {
+        if (pixels[i] != 0) {
+          blank = false;
+          break;
+        }
+      }
+      if (!blank) {
+        break;
+      }
+
+      MSG msg {};
+      while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+      }
       status = disp->snapshot(pull_free_image_cb, img_out, 250ms, false);
     }
 
