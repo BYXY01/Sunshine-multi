@@ -43,6 +43,7 @@ typedef enum _D3DKMT_GPU_PREFERENCE_QUERY_STATE : DWORD {
 #include "src/display_device.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "src/session_group.h"
 #include "src/video.h"
 
 namespace platf {
@@ -1014,6 +1015,41 @@ namespace platf {
    * @param hwdevice_type enables possible use of hardware encoder
    */
   std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
+    if (config::video.capture == "window") {
+      HWND target_hwnd = nullptr;
+
+      // Prefer a group-level HWND, then fall back to the first rule with an HWND.
+      for (const auto &group : session_group::active_groups.groups) {
+        if (!group.is_window_capture()) {
+          continue;
+        }
+        if (group.hwnd != 0) {
+          target_hwnd = (HWND) group.hwnd;
+          break;
+        }
+        for (const auto &rule : group.rules) {
+          if (rule.hwnd != 0) {
+            target_hwnd = (HWND) rule.hwnd;
+            break;
+          }
+        }
+        if (target_hwnd) {
+          break;
+        }
+      }
+
+      if (!target_hwnd) {
+        BOOST_LOG(error) << "Window capture requested but no HWND was provided. Add a \"hwnd\" field to the session group or use --hwnd."sv;
+        return nullptr;
+      }
+
+      auto disp = std::make_shared<dxgi::display_window_t>();
+      if (!disp->init(config, display_name, target_hwnd)) {
+        return disp;
+      }
+      return nullptr;
+    }
+
     if (config::video.capture == "ddx" || config::video.capture.empty()) {
       if (hwdevice_type == mem_type_e::dxgi) {
         auto disp = std::make_shared<dxgi::display_ddup_vram_t>();

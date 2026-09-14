@@ -9,6 +9,7 @@
 #include "display.h"
 #include "misc.h"
 #include "src/logging.h"
+#include "utf_utils.h"
 
 // Gross hack to work around MINGW-packages#22160
 #define ____FIReference_1_boolean_INTERFACE_DEFINED__
@@ -132,6 +133,68 @@ namespace platf::dxgi {
       return -1;
     }
 
+    return finalize_init(display, config);
+  }
+
+  /**
+   * @brief Initialize capture for a specific top-level window instead of a monitor.
+   *
+   * @param display Display object or identifier associated with the operation.
+   * @param config Configuration values to apply.
+   * @param hwnd Win32 window handle to capture.
+   * @return 0 on success; nonzero or negative platform status on failure.
+   */
+  int wgc_capture_t::init_window(display_base_t *display, const ::video::config_t &config, HWND hwnd) {
+    HRESULT status;
+    dxgi::dxgi_t dxgi;
+    winrt::com_ptr<::IInspectable> d3d_comhandle;
+    try {
+      if (!winrt::GraphicsCaptureSession::IsSupported()) {
+        BOOST_LOG(error) << "Screen capture is not supported on this device for this release of Windows!"sv;
+        return -1;
+      }
+      if (FAILED(status = display->device->QueryInterface(IID_IDXGIDevice, (void **) &dxgi))) {
+        BOOST_LOG(error) << "Failed to query DXGI interface from device [0x"sv << util::hex(status).to_string_view() << ']';
+        return -1;
+      }
+      if (FAILED(status = winrt::CreateDirect3D11DeviceFromDXGIDevice(*&dxgi, d3d_comhandle.put()))) {
+        BOOST_LOG(error) << "Failed to query WinRT DirectX interface from device [0x"sv << util::hex(status).to_string_view() << ']';
+        return -1;
+      }
+    } catch (winrt::hresult_error &e) {
+      BOOST_LOG(error) << "Screen capture is not supported on this device for this release of Windows: failed to acquire device: [0x"sv << util::hex(e.code()).to_string_view() << ']';
+      return -1;
+    }
+
+    if (!IsWindow(hwnd)) {
+      BOOST_LOG(error) << "Window capture: invalid window handle [0x"sv << util::hex((std::uintptr_t) hwnd).to_string_view() << ']';
+      return -1;
+    }
+
+    uwp_device = d3d_comhandle.as<winrt::IDirect3DDevice>();
+
+    auto capture_factory = winrt::get_activation_factory<winrt::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
+    if (capture_factory == nullptr || FAILED(status = capture_factory->CreateForWindow(hwnd, winrt::guid_of<winrt::IGraphicsCaptureItem>(), winrt::put_abi(item)))) {
+      BOOST_LOG(error) << "Window capture: failed to create capture item for window [0x"sv << util::hex(status).to_string_view() << ']';
+      return -1;
+    }
+
+    RECT window_rect {};
+    GetWindowRect(hwnd, &window_rect);
+    display->width = window_rect.right - window_rect.left;
+    display->height = window_rect.bottom - window_rect.top;
+
+    return finalize_init(display, config);
+  }
+
+  /**
+   * @brief Shared capture session setup used by both monitor and window backends.
+   *
+   * @param display Display object or identifier associated with the operation.
+   * @param config Configuration values to apply.
+   * @return 0 on success; nonzero or negative platform status on failure.
+   */
+  int wgc_capture_t::finalize_init(display_base_t *display, const ::video::config_t &config) {
     if (config.dynamicRange) {
       display->capture_format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     } else {
@@ -351,5 +414,168 @@ namespace platf::dxgi {
 
   capture_e display_wgc_ram_t::release_snapshot() {
     return dup.release_frame();
+  }
+
+  int display_window_t::init(const ::video::config_t &config, const std::string &display_name, HWND hwnd) {
+    HRESULT status;
+    env_width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    env_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+    status = CreateDXGIFactory1(IID_IDXGIFactory1, (void **) &factory);
+    if (FAILED(status)) {
+      BOOST_LOG(error) << "Window capture: failed to create DXGIFactory1 [0x"sv << util::hex(status).to_string_view() << ']';
+      return -1;
+    }
+
+    auto adapter_name = utf_utils::from_utf8(config::video.adapter_name);
+    adapter_t::pointer adapter_p;
+    for (int x = 0; factory->EnumAdapters1(x, &adapter_p) != DXGI_ERROR_NOT_FOUND; ++x) {
+      dxgi::adapter_t adapter_tmp {adapter_p};
+      DXGI_ADAPTER_DESC1 adapter_desc;
+      adapter_tmp->GetDesc1(&adapter_desc);
+
+      if (!adapter_name.empty() && adapter_desc.Description != adapter_name) {
+        continue;
+      }
+
+      adapter = std::move(adapter_tmp);
+      break;
+    }
+
+    if (!adapter) {
+      BOOST_LOG(error) << "Window capture: failed to locate an adapter"sv;
+      return -1;
+    }
+
+    D3D_FEATURE_LEVEL featureLevels[] {
+      D3D_FEATURE_LEVEL_11_1,
+      D3D_FEATURE_LEVEL_11_0,
+      D3D_FEATURE_LEVEL_10_1,
+      D3D_FEATURE_LEVEL_10_0,
+      D3D_FEATURE_LEVEL_9_3,
+      D3D_FEATURE_LEVEL_9_2,
+      D3D_FEATURE_LEVEL_9_1
+    };
+
+    status = adapter->QueryInterface(IID_IDXGIAdapter, (void **) &adapter_p);
+    if (FAILED(status)) {
+      BOOST_LOG(error) << "Window capture: failed to query IDXGIAdapter interface"sv;
+      return -1;
+    }
+
+    status = D3D11CreateDevice(
+      adapter_p,
+      D3D_DRIVER_TYPE_UNKNOWN,
+      nullptr,
+      D3D11_CREATE_DEVICE_FLAGS,
+      featureLevels,
+      sizeof(featureLevels) / sizeof(D3D_FEATURE_LEVEL),
+      D3D11_SDK_VERSION,
+      &device,
+      &feature_level,
+      &device_ctx
+    );
+
+    adapter_p->Release();
+
+    if (FAILED(status)) {
+      BOOST_LOG(error) << "Window capture: failed to create D3D11 device [0x"sv << util::hex(status).to_string_view() << ']';
+      return -1;
+    }
+
+    client_frame_rate = config.framerate;
+    client_frame_rate_strict = {0, 0};
+    if (config.framerateX100 > 0) {
+      const AVRational fps = ::video::framerate_to_rational(config);
+      client_frame_rate_strict = DXGI_RATIONAL {static_cast<UINT>(fps.num), static_cast<UINT>(fps.den)};
+    }
+
+    if (wgc.init_window(this, config, hwnd)) {
+      return -1;
+    }
+
+    texture.reset();
+    return 0;
+  }
+
+  capture_e display_window_t::snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) {
+    HRESULT status;
+    texture2d_t src;
+    uint64_t frame_qpc;
+    wgc.set_cursor_visible(cursor_visible);
+    auto capture_status = wgc.next_frame(timeout, &src, frame_qpc);
+    if (capture_status != capture_e::ok) {
+      return capture_status;
+    }
+
+    auto frame_timestamp = std::chrono::steady_clock::now() - qpc_time_difference(qpc_counter(), frame_qpc);
+    D3D11_TEXTURE2D_DESC desc;
+    src->GetDesc(&desc);
+
+    // Create the staging texture if it doesn't exist. It should match the source in size and format.
+    if (texture == nullptr) {
+      capture_format = desc.Format;
+      BOOST_LOG(info) << "Window capture format ["sv << dxgi_format_to_string(capture_format) << ']';
+
+      D3D11_TEXTURE2D_DESC t {};
+      t.Width = width;
+      t.Height = height;
+      t.MipLevels = 1;
+      t.ArraySize = 1;
+      t.SampleDesc.Count = 1;
+      t.Usage = D3D11_USAGE_STAGING;
+      t.Format = capture_format;
+      t.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+
+      auto status = device->CreateTexture2D(&t, nullptr, &texture);
+
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Window capture: failed to create staging texture [0x"sv << util::hex(status).to_string_view() << ']';
+        return capture_e::error;
+      }
+    }
+
+    if (desc.Width != width || desc.Height != height) {
+      BOOST_LOG(info) << "Window capture size changed ["sv << width << 'x' << height << " -> "sv << desc.Width << 'x' << desc.Height << ']';
+      return capture_e::reinit;
+    }
+    if (capture_format != desc.Format) {
+      BOOST_LOG(info) << "Window capture format changed ["sv << dxgi_format_to_string(capture_format) << " -> "sv << dxgi_format_to_string(desc.Format) << ']';
+      return capture_e::reinit;
+    }
+
+    // Copy from GPU to CPU
+    device_ctx->CopyResource(texture.get(), src.get());
+
+    if (!pull_free_image_cb(img_out)) {
+      return capture_e::interrupted;
+    }
+    auto img = (img_t *) img_out.get();
+
+    if (FAILED(status = device_ctx->Map(texture.get(), 0, D3D11_MAP_READ, 0, &img_info))) {
+      BOOST_LOG(error) << "Window capture: failed to map texture [0x"sv << util::hex(status).to_string_view() << ']';
+      return capture_e::error;
+    }
+
+    if (complete_img(img, false)) {
+      device_ctx->Unmap(texture.get(), 0);
+      img_info.pData = nullptr;
+      return capture_e::error;
+    }
+
+    std::copy_n((std::uint8_t *) img_info.pData, height * img_info.RowPitch, (std::uint8_t *) img->data);
+
+    device_ctx->Unmap(texture.get(), 0);
+    img_info.pData = nullptr;
+
+    if (img) {
+      img->frame_timestamp = frame_timestamp;
+    }
+
+    return capture_e::ok;
+  }
+
+  capture_e display_window_t::release_snapshot() {
+    return wgc.release_frame();
   }
 }  // namespace platf::dxgi

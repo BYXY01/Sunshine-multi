@@ -732,6 +732,23 @@ namespace platf::dxgi {
      */
     int init(display_base_t *display, const ::video::config_t &config);
     /**
+     * @brief Initialize capture for a specific top-level window instead of a monitor.
+     *
+     * @param display Display object or identifier associated with the operation.
+     * @param config Configuration values to apply.
+     * @param hwnd Win32 window handle to capture.
+     * @return 0 on success; nonzero or negative platform status on failure.
+     */
+    int init_window(display_base_t *display, const ::video::config_t &config, HWND hwnd);
+    /**
+     * @brief Shared capture session setup used by both monitor and window backends.
+     *
+     * @param display Display object or identifier associated with the operation.
+     * @param config Configuration values to apply.
+     * @return 0 on success; nonzero or negative platform status on failure.
+     */
+    int finalize_init(display_base_t *display, const ::video::config_t &config);
+    /**
      * @brief Acquire the next frame from the Windows capture backend.
      *
      * @param timeout Maximum time to wait for the operation.
@@ -805,6 +822,44 @@ namespace platf::dxgi {
     int init(const ::video::config_t &config, const std::string &display_name);
     /**
      * @brief Capture a display frame into the provided image object.
+     *
+     * @param pull_free_image_cb Callback that provides an available image buffer.
+     * @param img_out Captured image buffer returned to the streaming pipeline.
+     * @param timeout Maximum time to wait for the operation.
+     * @param cursor_visible Cursor visible.
+     * @return Capture status reported to the streaming pipeline.
+     */
+    capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) override;
+    /**
+     * @brief Release resources associated with the last captured snapshot.
+     *
+     * @return Capture status after releasing the current snapshot.
+     */
+    capture_e release_snapshot() override;
+  };
+
+  /**
+   * @brief Window compositing capture backend (software-encoded frames).
+   *
+   * Captures a single top-level window through the Windows.Graphics.Capture
+   * API and exposes it as a RAM-backed `platf::display_t`. Unlike the
+   * monitor-based backends, no DXGI output enumeration is required.
+   */
+  class display_window_t: public display_ram_t {
+    wgc_capture_t wgc;  ///< WGC window capture session.
+
+  public:
+    /**
+     * @brief Initialize window capture for the given handle.
+     *
+     * @param config Configuration values to apply.
+     * @param display_name Display name.
+     * @param hwnd Win32 window handle to capture.
+     * @return 0 on success; nonzero or negative platform status on failure.
+     */
+    int init(const ::video::config_t &config, const std::string &display_name, HWND hwnd);
+    /**
+     * @brief Capture a window frame into the provided image object.
      *
      * @param pull_free_image_cb Callback that provides an available image buffer.
      * @param img_out Captured image buffer returned to the streaming pipeline.
