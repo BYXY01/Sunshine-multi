@@ -5,6 +5,7 @@
 #pragma once
 
 // standard includes
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
@@ -135,6 +136,14 @@ namespace test_utils {
 #else
   #define IS_WINDOWS false
 #endif
+
+// Test command-line arguments shared across test files.
+namespace test_args {
+  /**
+   * @brief HWND value supplied via --window-hwnd, or 0 when not specified.
+   */
+  inline std::uintptr_t window_hwnd {};
+}  // namespace test_args
 
 #ifdef __linux__
   #define IS_LINUX true

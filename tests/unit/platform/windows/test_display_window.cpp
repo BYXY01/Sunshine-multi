@@ -206,18 +206,53 @@ class DisplayWindowCaptureTest: public PlatformTestSuite {};
 
 TEST_F(DisplayWindowCaptureTest, CapturesAVisibleWindowFrame) {
   auto candidates = collect_capture_windows();
-  if (candidates.empty()) {
+
+  // When a specific window is requested via --window-hwnd, use only that one
+  // and require it to be valid. Otherwise fall back to enumerated candidates.
+  std::vector<std::pair<HWND, std::string>> targets;
+  if (test_args::window_hwnd != 0) {
+    auto hwnd = reinterpret_cast<HWND>(test_args::window_hwnd);
+    if (!IsWindow(hwnd)) {
+      FAIL() << "--window-hwnd does not reference a valid window";
+      return;
+    }
+
+    RECT rect {};
+    GetWindowRect(hwnd, &rect);
+    targets.emplace_back(hwnd, "command-line window");
+  } else {
+    targets = std::move(candidates);
+  }
+
+  if (targets.empty()) {
     GTEST_SKIP() << "No capture-eligible visible window found";
     return;
   }
 
   std::shared_ptr<platf::img_t> img;
   platf::capture_e status = platf::capture_e::error;
+  HWND captured_hwnd = nullptr;
+  RECT captured_rect {};
 
-  for (auto &[hwnd, _] : candidates) {
+  for (auto &[hwnd, _] : targets) {
     status = try_capture(hwnd, img);
     if (status == platf::capture_e::ok && img) {
+      captured_hwnd = hwnd;
+      GetWindowRect(hwnd, &captured_rect);
       break;
+    }
+  }
+
+  {
+    std::ofstream diag {"window_capture_result.txt"};
+    diag << "captured_hwnd=" << reinterpret_cast<std::uintptr_t>(captured_hwnd) << "\n";
+    diag << "captured_rect=" << (captured_rect.right - captured_rect.left) << 'x' << (captured_rect.bottom - captured_rect.top) << "\n";
+    diag << "img_size=" << (img ? img->width : 0) << 'x' << (img ? img->height : 0) << "\n";
+    diag << "status=" << static_cast<int>(status) << "\n";
+    for (auto &[hwnd, title] : targets) {
+      RECT rect {};
+      GetWindowRect(hwnd, &rect);
+      diag << "target hwnd=" << reinterpret_cast<std::uintptr_t>(hwnd) << " size=" << (rect.right - rect.left) << 'x' << (rect.bottom - rect.top) << " title=" << title << "\n";
     }
   }
 
@@ -231,6 +266,14 @@ TEST_F(DisplayWindowCaptureTest, CapturesAVisibleWindowFrame) {
   EXPECT_EQ(img->pixel_pitch, 4);
   ASSERT_NE(img->data, nullptr);
   EXPECT_TRUE(img->frame_timestamp.has_value());
+
+  // The captured frame must match the target window's dimensions, proving the
+  // capture really targeted that window rather than the full desktop.
+  const auto window_width = captured_rect.right - captured_rect.left;
+  const auto window_height = captured_rect.bottom - captured_rect.top;
+  EXPECT_EQ(img->width, window_width);
+  EXPECT_EQ(img->height, window_height);
+  BOOST_LOG(tests) << "captured " << img->width << 'x' << img->height << " for window " << window_width << 'x' << window_height;
 
   // The frame must contain more than just blank pixels.
   const auto *pixels = static_cast<const std::uint8_t *>(img->data);
