@@ -219,6 +219,7 @@ TEST_F(DisplayWindowCaptureTest, CapturesAVisibleWindowFrame) {
 
     targets.emplace_back(hwnd, "command-line window");
   } else {
+    GTEST_LOG_(INFO) << "No --window-hwnd specified; falling back to enumerated windows (" << candidates.size() << " candidates)";
     targets = std::move(candidates);
   }
 
