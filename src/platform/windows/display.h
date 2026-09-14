@@ -847,6 +847,7 @@ namespace platf::dxgi {
    */
   class display_window_t: public display_ram_t {
     wgc_capture_t wgc;  ///< WGC window capture session.
+    HWND hwnd {nullptr};  ///< Window handle being captured; null after the window closes.
 
   public:
     /**

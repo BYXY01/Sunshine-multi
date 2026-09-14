@@ -531,6 +531,7 @@ namespace platf::dxgi {
       return -1;
     }
 
+    this->hwnd = hwnd;
     BOOST_LOG(info) << "Window capture initialized: ["sv << width << 'x' << height << "] hwnd=0x"sv << util::hex((std::uintptr_t) hwnd).to_string_view();
     texture.reset();
     return 0;
@@ -538,6 +539,14 @@ namespace platf::dxgi {
 
   capture_e display_window_t::snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) {
     HRESULT status;
+
+    // If the captured window has been destroyed, stop the session instead of
+    // re-selecting another window: the box/application is gone.
+    if (!IsWindow(hwnd)) {
+      BOOST_LOG(warning) << "Window capture: captured window was closed, stopping stream"sv;
+      return capture_e::error;
+    }
+
     texture2d_t src;
     uint64_t frame_qpc;
     wgc.set_cursor_visible(cursor_visible);
