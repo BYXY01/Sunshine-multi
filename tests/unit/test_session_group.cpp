@@ -354,3 +354,48 @@ TEST(SessionGroupCliTest, ReturnsEmptyGroupsWithoutOptions) {
   ASSERT_TRUE(groups.has_value());
   EXPECT_TRUE(groups->groups.empty());
 }
+
+namespace {
+
+  /**
+   * @brief RAII guard that restores the active session groups afterwards.
+   */
+  class ActiveGroupsGuard {
+  public:
+    ActiveGroupsGuard():
+        saved_ {session_group::active_groups} {}
+
+    ~ActiveGroupsGuard() {
+      session_group::active_groups = std::move(saved_);
+    }
+
+  private:
+    session_group::groups_config_t saved_;  ///< Active groups restored on destruction.
+  };
+
+}  // namespace
+
+TEST(SessionGroupResolveActiveTest, ReturnsNameForSingleWindowGroup) {
+  ActiveGroupsGuard guard;
+  session_group::active_groups = session_group::groups_config_t {};
+  session_group::active_groups.groups.emplace_back(session_group::config_t {"user1", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, {}, 60, 20000});
+
+  EXPECT_EQ(session_group::resolve_active_window_group(), "user1");
+}
+
+TEST(SessionGroupResolveActiveTest, ReturnsEmptyWhenNoWindowGroup) {
+  ActiveGroupsGuard guard;
+  session_group::active_groups = session_group::groups_config_t {};
+  session_group::active_groups.groups.emplace_back(session_group::config_t {"mon", std::string {session_group::CAPTURE_MONITOR}, 48010, 0, {}, {}, {}, 60, 0});
+
+  EXPECT_TRUE(session_group::resolve_active_window_group().empty());
+}
+
+TEST(SessionGroupResolveActiveTest, ReturnsEmptyForMultipleWindowGroups) {
+  ActiveGroupsGuard guard;
+  session_group::active_groups = session_group::groups_config_t {};
+  session_group::active_groups.groups.emplace_back(session_group::config_t {"a", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, {}, 60, 0});
+  session_group::active_groups.groups.emplace_back(session_group::config_t {"b", std::string {session_group::CAPTURE_WINDOW}, 48011, 0x4D3, {}, {}, {}, 60, 0});
+
+  EXPECT_TRUE(session_group::resolve_active_window_group().empty());
+}

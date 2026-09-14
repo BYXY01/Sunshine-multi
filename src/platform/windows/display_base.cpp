@@ -1014,27 +1014,35 @@ namespace platf {
    * Pick a display adapter and capture method.
    * @param hwdevice_type enables possible use of hardware encoder
    */
-  std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
+  std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config, const std::string_view &group_name) {
     if (config::video.capture == "window") {
       HWND target_hwnd = nullptr;
 
-      // Prefer a group-level HWND, then fall back to the first rule with an HWND.
+      // Prefer the group identified by group_name, then fall back to the first
+      // window group. Within a group, prefer a group-level HWND, then the first
+      // rule with an HWND.
+      const session_group::config_t *selected_group = nullptr;
       for (const auto &group : session_group::active_groups.groups) {
         if (!group.is_window_capture()) {
           continue;
         }
-        if (group.hwnd != 0) {
-          target_hwnd = (HWND) group.hwnd;
-          break;
+        if (!group_name.empty() && group.name != group_name) {
+          continue;
         }
-        for (const auto &rule : group.rules) {
-          if (rule.hwnd != 0) {
-            target_hwnd = (HWND) rule.hwnd;
-            break;
+        selected_group = &group;
+        break;
+      }
+
+      if (selected_group) {
+        if (selected_group->hwnd != 0) {
+          target_hwnd = (HWND) selected_group->hwnd;
+        } else {
+          for (const auto &rule : selected_group->rules) {
+            if (rule.hwnd != 0) {
+              target_hwnd = (HWND) rule.hwnd;
+              break;
+            }
           }
-        }
-        if (target_hwnd) {
-          break;
         }
       }
 

@@ -8,7 +8,9 @@
 #include <atomic>
 #include <bitset>
 #include <list>
+#include <mutex>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 
 // lib includes
@@ -33,6 +35,7 @@ extern "C" {
 #include "logging.h"
 #include "nvenc/nvenc_encoder.h"
 #include "platform/common.h"
+#include "session_group.h"
 #include "sync.h"
 #include "video.h"
 
@@ -669,6 +672,7 @@ namespace video {
     safe::signal_t reinit_event;  ///< Reinit event.
     const encoder_t *encoder_p;  ///< Encoder p.
     sync_util::sync_t<std::weak_ptr<platf::display_t>> display_wp;  ///< Display wp.
+    std::string group_name;  ///< Session group name; empty selects the legacy single display.
   };
 
   /**
@@ -708,6 +712,48 @@ namespace video {
   // Keep a reference counter to ensure the capture thread only runs when other threads have a reference to the capture thread
   auto capture_thread_async = safe::make_shared<capture_thread_async_ctx_t>(start_capture_async, end_capture_async);  ///< Capture thread async.
   auto capture_thread_sync = safe::make_shared<capture_thread_sync_ctx_t>(start_capture_sync, end_capture_sync);  ///< Capture thread sync.
+
+  /**
+   * @brief Look up or lazily create the capture thread for a session group.
+   *
+   * Each configured window-capture group owns its own capture thread and
+   * display, so its clients share a single capture stream. The returned
+   * reference keeps the group's thread alive; when the last client releases
+   * it, the thread is stopped and the group entry is erased.
+   *
+   * @param group_name Session group name.
+   * @return Reference to the group's capture context, or null when the group
+   * is unknown.
+   */
+  safe::shared_t<capture_thread_async_ctx_t>::ptr_t capture_group_ref(const std::string &group_name) {
+    static std::mutex mutex;
+    static std::unordered_map<std::string, std::shared_ptr<safe::shared_t<capture_thread_async_ctx_t>>> groups;
+
+    std::lock_guard lg {mutex};
+
+    auto &entry = groups[group_name];
+    if (!entry) {
+      auto bound_name = group_name;  // copy so the stored callback stays valid
+      entry = std::make_shared<safe::shared_t<capture_thread_async_ctx_t>>(
+        [bound_name = std::move(bound_name)](capture_thread_async_ctx_t &ctx) mutable {
+          // Bind the group name before the capture thread starts so it can
+          // create the correct display.
+          ctx.group_name = bound_name;
+          return start_capture_async(ctx);
+        },
+        end_capture_async
+      );
+    }
+
+    auto ref = entry->ref();
+    if (ref) {
+      return ref;
+    }
+
+    // Construction failed; drop the broken entry so a later attempt retries.
+    groups.erase(group_name);
+    return {};
+  }
 
 #ifdef _WIN32
   /**
@@ -1534,7 +1580,8 @@ namespace video {
     std::shared_ptr<safe::queue_t<capture_ctx_t>> capture_ctx_queue,
     sync_util::sync_t<std::weak_ptr<platf::display_t>> &display_wp,
     safe::signal_t &reinit_event,
-    const encoder_t &encoder
+    const encoder_t &encoder,
+    const std::string_view &group_name
   ) {
     std::vector<capture_ctx_t> capture_ctxs;
 
@@ -1564,7 +1611,7 @@ namespace video {
     std::vector<std::string> display_names;
     int display_p = -1;
     refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
-    auto disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
+    auto disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config, group_name);
     if (!disp) {
       return;
     }
@@ -2846,7 +2893,8 @@ namespace video {
   void capture_async(
     safe::mail_t mail,
     config_t &config,
-    void *channel_data
+    void *channel_data,
+    const std::string &group_name = {}
   ) {
     auto shutdown_event = mail->event<bool>(mail::shutdown);
 
@@ -2856,7 +2904,10 @@ namespace video {
       shutdown_event->raise(true);
     });
 
-    auto ref = capture_thread_async.ref();
+    // Select the capture context: the session-group thread when a group is
+    // named, otherwise the legacy shared thread.
+    auto group_ref = group_name.empty() ? safe::shared_t<capture_thread_async_ctx_t>::ptr_t {} : capture_group_ref(group_name);
+    auto ref = group_ref ? std::move(group_ref) : capture_thread_async.ref();
     if (!ref) {
       return;
     }
@@ -2937,7 +2988,8 @@ namespace video {
   void capture(
     safe::mail_t mail,
     config_t config,
-    void *channel_data
+    void *channel_data,
+    const std::string &group_name
   ) {
     config = resolve_dynamic_range(*chosen_encoder, config);
 
@@ -2945,7 +2997,7 @@ namespace video {
 
     idr_events->raise(true);
     if (chosen_encoder->flags & PARALLEL_ENCODING) {
-      capture_async(std::move(mail), config, channel_data);
+      capture_async(std::move(mail), config, channel_data, group_name);
     } else {
       safe::signal_t join_event;
       auto ref = capture_thread_sync.ref();
@@ -3632,7 +3684,8 @@ namespace video {
       capture_thread_ctx.capture_ctx_queue,
       std::ref(capture_thread_ctx.display_wp),
       std::ref(capture_thread_ctx.reinit_event),
-      std::ref(*capture_thread_ctx.encoder_p)
+      std::ref(*capture_thread_ctx.encoder_p),
+      std::string {capture_thread_ctx.group_name}
     };
 
     return 0;

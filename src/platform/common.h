@@ -915,9 +915,11 @@ namespace platf {
    * If you require to use this parameter in a separate thread, make a copy of it.
    * @param display_name The name of the monitor that SHOULD be displayed
    * @param config Stream configuration
+   * @param group_name Optional session group name; window capture uses it to
+   * select the target group (empty selects the first configured window group).
    * @return The display_t instance based on hwdevice_type.
    */
-  std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config);
+  std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config, const std::string_view &group_name = {});
 
   // A list of names of displays accepted as display_name with the mem_type_e
   /**

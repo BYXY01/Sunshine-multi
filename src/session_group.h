@@ -166,4 +166,15 @@ namespace session_group {
    */
   std::optional<groups_config_t> groups_from_cli(const cli_options_t &opts);
 
+  /**
+   * @brief Resolve the active window-capture group name.
+   *
+   * Returns the name of the single window-capture group when exactly one is
+   * configured; returns an empty string when there are none or more than one.
+   * Stream sessions use this to share one capture thread per group.
+   *
+   * @return Active window group name, or empty.
+   */
+  std::string resolve_active_window_group();
+
 }  // namespace session_group

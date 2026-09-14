@@ -226,4 +226,20 @@ namespace session_group {
     return result;
   }
 
+  std::string resolve_active_window_group() {
+    std::string active;
+    for (const auto &group : active_groups.groups) {
+      if (!group.is_window_capture()) {
+        continue;
+      }
+      if (!active.empty()) {
+        // Multiple window groups: routing needs per-port dispatch, which is
+        // not wired up yet, so fall back to the legacy shared capture.
+        return {};
+      }
+      active = group.name;
+    }
+    return active;
+  }
+
 }  // namespace session_group
