@@ -418,6 +418,17 @@ namespace platf::dxgi {
 
   int display_window_t::init(const ::video::config_t &config, const std::string &display_name, HWND hwnd) {
     HRESULT status;
+
+    // WGC window capture requires a COM apartment on the calling thread.
+    // Calling CoInitializeEx repeatedly on an already-initialized thread is
+    // a no-op (returns S_FALSE / RPC_E_CHANGED_MODE), so this is safe even
+    // when the host process has already initialized COM.
+    auto com_hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(com_hr) && com_hr != RPC_E_CHANGED_MODE) {
+      BOOST_LOG(error) << "Window capture: CoInitializeEx failed [0x"sv << util::hex(com_hr).to_string_view() << ']';
+      return -1;
+    }
+
     env_width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
     env_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
 
