@@ -171,6 +171,14 @@ namespace platf::dxgi {
       return -1;
     }
 
+    // WGC does not deliver frames for minimized windows. Restore the window
+    // before creating the capture item so the OS composites its content.
+    if (IsIconic(hwnd)) {
+      BOOST_LOG(info) << "Window capture: restoring minimized window"sv;
+      ShowWindow(hwnd, SW_RESTORE);
+    }
+    SetForegroundWindow(hwnd);
+
     uwp_device = d3d_comhandle.as<winrt::IDirect3DDevice>();
 
     auto capture_factory = winrt::get_activation_factory<winrt::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
@@ -179,10 +187,11 @@ namespace platf::dxgi {
       return -1;
     }
 
-    RECT window_rect {};
-    GetWindowRect(hwnd, &window_rect);
-    display->width = window_rect.right - window_rect.left;
-    display->height = window_rect.bottom - window_rect.top;
+    // Use the capture item's authoritative size rather than GetWindowRect,
+    // which includes the DWM drop shadow and would not match captured frames.
+    auto item_size = item.Size();
+    display->width = static_cast<int>(item_size.Width);
+    display->height = static_cast<int>(item_size.Height);
 
     return finalize_init(display, config);
   }

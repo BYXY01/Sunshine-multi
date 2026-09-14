@@ -217,8 +217,6 @@ TEST_F(DisplayWindowCaptureTest, CapturesAVisibleWindowFrame) {
       return;
     }
 
-    RECT rect {};
-    GetWindowRect(hwnd, &rect);
     targets.emplace_back(hwnd, "command-line window");
   } else {
     targets = std::move(candidates);
@@ -231,28 +229,13 @@ TEST_F(DisplayWindowCaptureTest, CapturesAVisibleWindowFrame) {
 
   std::shared_ptr<platf::img_t> img;
   platf::capture_e status = platf::capture_e::error;
-  HWND captured_hwnd = nullptr;
   RECT captured_rect {};
 
   for (auto &[hwnd, _] : targets) {
     status = try_capture(hwnd, img);
     if (status == platf::capture_e::ok && img) {
-      captured_hwnd = hwnd;
       GetWindowRect(hwnd, &captured_rect);
       break;
-    }
-  }
-
-  {
-    std::ofstream diag {"window_capture_result.txt"};
-    diag << "captured_hwnd=" << reinterpret_cast<std::uintptr_t>(captured_hwnd) << "\n";
-    diag << "captured_rect=" << (captured_rect.right - captured_rect.left) << 'x' << (captured_rect.bottom - captured_rect.top) << "\n";
-    diag << "img_size=" << (img ? img->width : 0) << 'x' << (img ? img->height : 0) << "\n";
-    diag << "status=" << static_cast<int>(status) << "\n";
-    for (auto &[hwnd, title] : targets) {
-      RECT rect {};
-      GetWindowRect(hwnd, &rect);
-      diag << "target hwnd=" << reinterpret_cast<std::uintptr_t>(hwnd) << " size=" << (rect.right - rect.left) << 'x' << (rect.bottom - rect.top) << " title=" << title << "\n";
     }
   }
 
@@ -267,12 +250,13 @@ TEST_F(DisplayWindowCaptureTest, CapturesAVisibleWindowFrame) {
   ASSERT_NE(img->data, nullptr);
   EXPECT_TRUE(img->frame_timestamp.has_value());
 
-  // The captured frame must match the target window's dimensions, proving the
-  // capture really targeted that window rather than the full desktop.
+  // The captured frame must match the target window's content size. GetWindowRect
+  // includes the DWM drop shadow, so allow a small margin, but it must clearly
+  // not be the full desktop resolution.
   const auto window_width = captured_rect.right - captured_rect.left;
   const auto window_height = captured_rect.bottom - captured_rect.top;
-  EXPECT_EQ(img->width, window_width);
-  EXPECT_EQ(img->height, window_height);
+  EXPECT_NEAR(img->width, window_width, 100);
+  EXPECT_NEAR(img->height, window_height, 100);
   BOOST_LOG(tests) << "captured " << img->width << 'x' << img->height << " for window " << window_width << 'x' << window_height;
 
   // The frame must contain more than just blank pixels.
