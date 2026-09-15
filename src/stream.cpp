@@ -31,7 +31,6 @@ extern "C" {
 #include "network.h"
 #include "platform/common.h"
 #include "process.h"
-#include "session_group.h"
 #include "stream.h"
 #include "sync.h"
 #include "system_tray.h"
@@ -554,6 +553,7 @@ namespace stream {
     std::uint32_t launch_session_id;  ///< RTSP launch-session ID associated with this stream.
     std::string client_cert;  ///< PEM certificate for the paired client owning the stream.
     std::string input_session_id;  ///< Stable client identity used to retain input devices across resume.
+    std::string group;  ///< Session group this stream belongs to; empty when ungrouped.
 
     safe::mail_raw_t::event_t<bool> shutdown_event;  ///< Event raised when the stream should shut down.
     safe::signal_t controlEnd;  ///< Signal raised when the control channel exits.
@@ -2148,7 +2148,7 @@ namespace stream {
     session->video.qos = platf::enable_socket_qos(ref->video_sock.native_handle(), address, session->video.peer.port(), platf::qos_data_type_e::video, session->config.videoQosType != 0);
 
     BOOST_LOG(debug) << "Start capturing Video"sv;
-    video::capture(session->mail, session->config.monitor, session, session_group::resolve_active_window_group());
+    video::capture(session->mail, session->config.monitor, session, session->group);
   }
 
   /**
@@ -2317,6 +2317,7 @@ namespace stream {
       session->launch_session_id = launch_session.id;
       session->client_cert = launch_session.client_cert;
       session->input_session_id = launch_session.client_cert.empty() ? launch_session.unique_id : launch_session.client_cert;
+      session->group = launch_session.group;
 
       session->config = config;
 

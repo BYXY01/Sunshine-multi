@@ -1,10 +1,11 @@
 # Session Groups (Window Capture)
 
 This fork adds multi-session window capture: one or more **session groups**
-group windows together, and each group is streamed over its own Moonlight
-session with its own capture thread. Different applications (or the same
-application for different users) can be captured and streamed independently
-and in parallel.
+group windows together, and each group is streamed over its own RTSP port
+(in `per-group-port` mode) or a shared port (in `single-port` mode), with
+its own capture thread. Different applications (or the same application for
+different users) can be captured and streamed independently and in
+parallel.
 
 ```
 group A (window capture) ── capture thread A ── display_t (compositing) ──► RTSP/session A
@@ -19,6 +20,9 @@ overrides the file.
 
 ```json
 {
+  "port_mode": "per-group-port",
+  "port_range": "48010-48100",
+  "default_group": "user1-notepad",
   "session_groups": [
     {
       "name": "user1-notepad",
@@ -40,6 +44,15 @@ overrides the file.
   ]
 }
 ```
+
+### Top-level fields
+
+| Field | Description |
+|---|---|
+| `port_mode` | **Required.** `single-port` (one shared RTSP port) or `per-group-port` (one port per group). |
+| `port_range` | **Required for `per-group-port`.** Inclusive port range, e.g. `"48010-48100"`. The number of ports bounds the maximum number of window groups. |
+| `default_group` | Group that receives sessions without an explicit group. In `per-group-port` mode it takes the first port of the range. |
+| `session_groups` | Ordered list of group definitions. |
 
 ### Group fields
 
@@ -65,6 +78,28 @@ A rule matches when any of its non-empty fields match the window:
 | `class` | Window class name. |
 | `hwnd` | Direct window handle. |
 
+## Port modes
+
+### single-port
+
+All groups share the official RTSP port (`47989`). Sessions are routed to a
+group by name: the launch request's `group` argument, then the configured
+`default_group`, then the lone window group if there is exactly one.
+
+### per-group-port
+
+Each window group gets its own dedicated RTSP port, allocated in ascending
+order from `port_range`. The configured `default_group` takes the first
+port; the remaining groups follow in configuration order. Binding each
+group logs its port:
+
+```
+Session group [user1-notepad] listening on RTSP port 48010
+```
+
+A group whose port cannot be allocated (the range is exhausted) is refused
+with an error instead of crashing.
+
 ## Window capture backends
 
 Window capture is available with both hardware and software encoders:
@@ -76,6 +111,9 @@ encoders use the RAM backend.
 
 | Option | Description |
 |---|---|
+| `--port-mode <mode>` | Global port mode: `single-port` or `per-group-port` (required). |
+| `--port-range <range>` | Per-group port range, e.g. `48010-48100`. |
+| `--default-group <name>` | Group receiving sessions without an explicit group. |
 | `--group <name>` | Name of a single session group. |
 | `--capture <backend>` | Capture backend: `window` or `monitor`. |
 | `--box <name>` | Process-group container name matching rule. |
@@ -89,5 +127,5 @@ encoders use the RAM backend.
 Example:
 
 ```
-sunshine --group user1-notepad --capture window --process notepad.exe
+sunshine --port-mode per-group-port --port-range 48010-48100 --config session-groups.json
 ```

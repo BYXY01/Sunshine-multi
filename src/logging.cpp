@@ -275,12 +275,15 @@ namespace logging {
       << "    session groups"sv << std::endl
       << "        --group <name>      | name of a single session group"sv << std::endl
       << "        --capture <backend> | capture backend: window or monitor"sv << std::endl
-      << "        --box <name>        | Sandboxie box name matching rule"sv << std::endl
+      << "        --box <name>        | process-group container name matching rule"sv << std::endl
       << "        --process <name>    | process name matching rule"sv << std::endl
       << "        --title <pattern>   | window title wildcard matching rule"sv << std::endl
       << "        --class <name>      | window class name matching rule"sv << std::endl
       << "        --hwnd <handle>     | direct Win32 window handle (decimal or 0x hex)"sv << std::endl
       << "        --port <number>     | Moonlight port for the session group"sv << std::endl
+      << "        --port-mode <mode>  | global port mode: single-port or per-group-port (required)"sv << std::endl
+      << "        --port-range <range>| per-group-port port range, e.g. 48010-48100"sv << std::endl
+      << "        --default-group <name> | group receiving sessions without an explicit group"sv << std::endl
       << "        --config <path>     | load session groups from a JSON file"sv << std::endl
       << std::endl
       << "    flags"sv << std::endl

@@ -34,6 +34,7 @@
 #include "platform/common.h"
 #include "process.h"
 #include "rtsp.h"
+#include "session_group.h"
 #include "system_tray.h"
 #include "utility.h"
 #include "uuid.h"
@@ -510,6 +511,7 @@ namespace nvhttp {
       launch_session->rtsp_iv_counter = 0;
     }
     launch_session->rtsp_url_scheme = launch_session->rtsp_cipher ? "rtspenc://"s : "rtsp://"s;
+    launch_session->group = session_group::resolve_launch_group(get_arg(args, "group", ""));
     launch_session->client_cert = last_verified_client_cert;
     launch_session->client_name = last_verified_client_name;
 
@@ -1422,13 +1424,17 @@ namespace nvhttp {
     }
 
     tree.put("root.<xmlattr>.status_code", 200);
+    auto rtsp_port = net::map_port(rtsp_stream::RTSP_SETUP_PORT);
+    if (auto group_port = session_group::port_for_group(launch_session->group)) {
+      rtsp_port = *group_port;
+    }
     tree.put(
       "root.sessionUrl0",
       std::format(
         "{}{}:{}",
         launch_session->rtsp_url_scheme,
         net::addr_to_url_escaped_string(request->local_endpoint().address()),
-        static_cast<int>(net::map_port(rtsp_stream::RTSP_SETUP_PORT))
+        static_cast<int>(rtsp_port)
       )
     );
     tree.put("root.gamesession", 1);
@@ -1523,13 +1529,17 @@ namespace nvhttp {
     }
 
     tree.put("root.<xmlattr>.status_code", 200);
+    auto rtsp_port = net::map_port(rtsp_stream::RTSP_SETUP_PORT);
+    if (auto group_port = session_group::port_for_group(launch_session->group)) {
+      rtsp_port = *group_port;
+    }
     tree.put(
       "root.sessionUrl0",
       std::format(
         "{}{}:{}",
         launch_session->rtsp_url_scheme,
         net::addr_to_url_escaped_string(request->local_endpoint().address()),
-        static_cast<int>(net::map_port(rtsp_stream::RTSP_SETUP_PORT))
+        static_cast<int>(rtsp_port)
       )
     );
     tree.put("root.resume", 1);

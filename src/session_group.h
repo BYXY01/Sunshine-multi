@@ -25,7 +25,7 @@ namespace session_group {
    * match (a window belongs to the group when it satisfies at least one rule).
    */
   struct window_rule_t {
-    std::string box;  ///< Sandboxie box name (process-group match).
+    std::string box;  ///< Process-group container name (accepted for compatibility, matching not implemented).
     std::string process;  ///< Process executable name match.
     std::string title;  ///< Window title wildcard match.
     std::string window_class;  ///< Window class name match.
@@ -71,12 +71,110 @@ namespace session_group {
     }
   };
 
+  inline constexpr std::string_view PORT_MODE_SINGLE = "single-port";  ///< Single shared RTSP acceptor mode.
+  inline constexpr std::string_view PORT_MODE_PER_GROUP = "per-group-port";  ///< One RTSP acceptor (and port) per group.
+
   /**
    * @brief Complete set of session groups parsed from configuration.
    */
   struct groups_config_t {
+    std::string port_mode;  ///< Global port mode: `single-port` or `per-group-port` (mandatory).
+    std::string port_range;  ///< Port range "start-end" required by `per-group-port`.
+    std::string default_group;  ///< Group receiving sessions without an explicit group.
     std::vector<config_t> groups;  ///< Ordered session groups.
   };
+
+  /**
+   * @brief Parse a port range string into its inclusive bounds.
+   *
+   * Accepts the "48010-48100" form. The start must be non-zero, the end must
+   * not exceed 65535, and start must be less than or equal to end.
+   *
+   * @param range Raw range text from configuration.
+   * @return (start, end) bounds, or nullopt when the text is malformed.
+   */
+  std::optional<std::pair<std::uint16_t, std::uint16_t>> parse_port_range(const std::string &range);
+
+  /**
+   * @brief Port allocator handing out free ports from a range.
+   *
+   * Ports are allocated in ascending order, always picking the smallest free
+   * port, and released ports are returned to the pool for reuse. When the
+   * pool is exhausted `allocate()` returns nullopt instead of failing.
+   */
+  class port_allocator_t {
+  public:
+    /**
+     * @brief Construct an allocator over an inclusive port range.
+     *
+     * @param start First port of the range.
+     * @param end Last port of the range (must be >= start).
+     */
+    port_allocator_t(std::uint16_t start, std::uint16_t end);
+
+    /**
+     * @brief Allocate the smallest free port from the pool.
+     *
+     * @return Allocated port, or nullopt when every port is in use.
+     */
+    std::optional<std::uint16_t> allocate();
+
+    /**
+     * @brief Return a previously allocated port to the pool.
+     *
+     * Releasing a port that is not currently allocated is a no-op.
+     *
+     * @param port Port to release.
+     */
+    void release(std::uint16_t port);
+
+    /**
+     * @brief Get the number of free ports remaining.
+     *
+     * @return Count of ports not currently allocated.
+     */
+    std::size_t available() const;
+
+    /**
+     * @brief Get the total number of ports in the range.
+     *
+     * @return Size of the full range.
+     */
+    std::size_t size() const;
+
+  private:
+    std::uint16_t start_;  ///< First port of the range.
+    std::uint16_t end_;  ///< Last port of the range.
+    std::vector<bool> in_use_;  ///< Per-port allocation state (indexed by port - start).
+    std::uint32_t next_hint_;  ///< Smallest candidate for the next allocation.
+  };
+
+  /**
+   * @brief Look up the RTSP port currently assigned to a session group.
+   *
+   * Populated by the RTSP layer when per-group-port mode binds each group's
+   * acceptor; returns nullopt for unknown groups or single-port mode.
+   *
+   * @param group_name Session group name.
+   * @return Assigned port, or nullopt when the group has no dedicated port.
+   */
+  std::optional<std::uint16_t> port_for_group(const std::string &group_name);
+
+  /**
+   * @brief Register the RTSP port assigned to a session group.
+   *
+   * Called by the RTSP layer when per-group-port mode binds a group's
+   * acceptor; the mapping is used to build the client-facing RTSP URL.
+   *
+   * @param group_name Session group name.
+   * @param port Assigned RTSP port.
+   */
+  void register_group_port(const std::string &group_name, std::uint16_t port);
+
+  /**
+   * @brief Clear all registered group-to-port mappings.
+   */
+  void clear_group_ports();
 
   /**
    * @brief Runtime global holding the active session groups.
@@ -105,8 +203,11 @@ namespace session_group {
   /**
    * @brief Validate a parsed group configuration.
    *
-   * Checks for unique group names, unique non-zero ports, a supported capture
-   * backend, and at least one matching rule for `window` groups.
+   * Checks that `port_mode` is explicitly set and valid, that
+   * `per-group-port` defines a parseable `port_range` large enough for the
+   * number of groups, that group names are unique and non-empty, that the
+   * capture backend is supported, and that `window` groups define at least
+   * one matching rule (or a group-level hwnd).
    *
    * @param groups Configuration to validate.
    * @return Human-readable error descriptions; empty when the configuration is valid.
@@ -133,6 +234,9 @@ namespace session_group {
     std::string window_class;  ///< Value of `--class`.
     std::uintptr_t hwnd {0};  ///< Value of `--hwnd`.
     std::optional<std::uint16_t> port;  ///< Value of `--port`.
+    std::string port_mode;  ///< Value of `--port-mode`.
+    std::string port_range;  ///< Value of `--port-range`.
+    std::string default_group;  ///< Value of `--default-group`.
     std::optional<std::filesystem::path> config_file;  ///< Value of `--config`.
   };
 
@@ -140,7 +244,7 @@ namespace session_group {
    * @brief Check whether a long option name is a session group CLI option.
    *
    * @param name Option name without the leading `--`.
-   * @return True for `group`, `capture`, `box`, `process`, `title`, `class`, `port`, or `config`.
+   * @return True for `group`, `capture`, `box`, `process`, `title`, `class`, `port`, `port-mode`, `port-range`, `default-group`, or `config`.
    */
   bool is_cli_option(const std::string_view &name);
 
@@ -178,14 +282,26 @@ namespace session_group {
   std::string resolve_active_window_group();
 
   /**
+   * @brief Resolve the session group a launch session belongs to.
+   *
+   * An explicit group name is honored when it names a configured window
+   * group. Without one, the configured default group is used when set and
+   * valid; otherwise the single window group (if any) is used. When none
+   * applies the result is empty so the launch session stays ungrouped.
+   *
+   * @param requested Explicit group name from the launch request; may be empty.
+   * @return Resolved window group name, or empty when none applies.
+   */
+  std::string resolve_launch_group(const std::string &requested);
+
+  /**
    * @brief Match a single top-level window against a group's rules.
    *
    * The window belongs to the group when any rule matches it (OR semantics).
    * A rule matches when the window handle equals the rule's hwnd, or the
    * process name matches `process`, or the window title matches `title`, or
-   * the window class matches `class`. The `box` field is intentionally not
-   * implemented here: the cloudapp consumer resolves Sandboxie boxes into
-   * explicit hwnd/process rules before reaching Sunshine.
+   * the window class matches `class`. The `box` field is accepted for
+   * configuration compatibility but is intentionally not evaluated here.
    *
    * @param group Session group rules to test against.
    * @param hwnd Window handle to evaluate.

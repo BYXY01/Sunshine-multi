@@ -7,9 +7,12 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -35,6 +38,110 @@ namespace session_group {
    * @brief Runtime global holding the active session groups.
    */
   groups_config_t active_groups;
+
+  std::optional<std::pair<std::uint16_t, std::uint16_t>> parse_port_range(const std::string &range) {
+    auto dash = range.find('-');
+    if (dash == std::string::npos || dash == 0 || dash + 1 >= range.size()) {
+      return std::nullopt;
+    }
+
+    auto to_port = [](const std::string &text) -> std::optional<std::uint16_t> {
+      if (text.empty()) {
+        return std::nullopt;
+      }
+      try {
+        std::size_t pos = 0;
+        auto parsed = std::stoul(text, &pos, 10);
+        if (pos != text.size() || parsed == 0 || parsed > 65535) {
+          return std::nullopt;
+        }
+        return static_cast<std::uint16_t>(parsed);
+      } catch (const std::exception &) {
+        return std::nullopt;
+      }
+    };
+
+    auto start = to_port(range.substr(0, dash));
+    auto end = to_port(range.substr(dash + 1));
+    if (!start || !end || *start > *end) {
+      return std::nullopt;
+    }
+    return std::pair {*start, *end};
+  }
+
+  port_allocator_t::port_allocator_t(std::uint16_t start, std::uint16_t end):
+      start_ {start},
+      end_ {end},
+      in_use_(static_cast<std::size_t>(end - start) + 1, false),
+      next_hint_ {start} {}
+
+  std::optional<std::uint16_t> port_allocator_t::allocate() {
+    if (next_hint_ > end_) {
+      return std::nullopt;
+    }
+    for (auto port = next_hint_; port <= end_; ++port) {
+      if (!in_use_[static_cast<std::size_t>(port) - start_]) {
+        in_use_[static_cast<std::size_t>(port) - start_] = true;
+        next_hint_ = port + 1;
+        return static_cast<std::uint16_t>(port);
+      }
+    }
+    return std::nullopt;
+  }
+
+  void port_allocator_t::release(std::uint16_t port) {
+    if (port < start_ || port > end_) {
+      return;
+    }
+    auto index = static_cast<std::size_t>(port) - start_;
+    if (in_use_[index]) {
+      in_use_[index] = false;
+      if (port < next_hint_) {
+        next_hint_ = port;
+      }
+    }
+  }
+
+  std::size_t port_allocator_t::available() const {
+    return static_cast<std::size_t>(std::count(in_use_.begin(), in_use_.end(), false));
+  }
+
+  std::size_t port_allocator_t::size() const {
+    return in_use_.size();
+  }
+
+  namespace {
+    std::mutex group_port_mutex;  ///< Guards the group-to-port mapping.
+    std::unordered_map<std::string, std::uint16_t> group_ports;  ///< Group name to assigned RTSP port.
+  }  // namespace
+
+  std::optional<std::uint16_t> port_for_group(const std::string &group_name) {
+    std::scoped_lock lock {group_port_mutex};
+    auto it = group_ports.find(group_name);
+    if (it == group_ports.end()) {
+      return std::nullopt;
+    }
+    return it->second;
+  }
+
+  /**
+   * @brief Register the RTSP port assigned to a session group.
+   *
+   * @param group_name Session group name.
+   * @param port Assigned RTSP port.
+   */
+  void register_group_port(const std::string &group_name, std::uint16_t port) {
+    std::scoped_lock lock {group_port_mutex};
+    group_ports[group_name] = port;
+  }
+
+  /**
+   * @brief Clear all registered group-to-port mappings.
+   */
+  void clear_group_ports() {
+    std::scoped_lock lock {group_port_mutex};
+    group_ports.clear();
+  }
 
   /**
    * @brief Parse a window handle string into a numeric HWND value.
@@ -71,13 +178,16 @@ namespace session_group {
       return std::nullopt;
     }
 
+    groups_config_t result;
+    result.port_mode = root.get<std::string>("port_mode", "");
+    result.port_range = root.get<std::string>("port_range", "");
+    result.default_group = root.get<std::string>("default_group", "");
+
     auto groups_node = root.get_child_optional("session_groups");
     if (!groups_node) {
       BOOST_LOG(warning) << "session_group: session groups JSON is missing the \"session_groups\" key"sv;
-      return groups_config_t {};
+      return result;
     }
-
-    groups_config_t result;
     for (auto &[_, group_node] : *groups_node) {
       config_t group;
       group.name = group_node.get<std::string>("name", "");
@@ -134,7 +244,32 @@ namespace session_group {
   std::vector<std::string> validate_groups(const groups_config_t &groups) {
     std::vector<std::string> errors;
     std::unordered_set<std::string> names;
-    std::unordered_set<std::uint16_t> ports;
+
+    if (groups.port_mode.empty()) {
+      errors.emplace_back("port_mode must be explicitly set to 'single-port' or 'per-group-port'");
+    } else if (groups.port_mode != PORT_MODE_SINGLE && groups.port_mode != PORT_MODE_PER_GROUP) {
+      errors.emplace_back("invalid port_mode '" + groups.port_mode + "' (expected 'single-port' or 'per-group-port')");
+    }
+
+    if (groups.port_mode == PORT_MODE_PER_GROUP) {
+      auto bounds = parse_port_range(groups.port_range);
+      if (groups.port_range.empty()) {
+        errors.emplace_back("port_mode 'per-group-port' requires a non-empty port_range (e.g. \"48010-48100\")");
+      } else if (!bounds) {
+        errors.emplace_back("invalid port_range '" + groups.port_range + "' (expected \"start-end\" with 1 <= start <= end <= 65535)");
+      } else if (groups.groups.size() > static_cast<std::size_t>(bounds->second - bounds->first) + 1) {
+        errors.emplace_back("too many session groups (" + std::to_string(groups.groups.size()) + ") for port_range '" + groups.port_range + "'; the range size limits the maximum number of groups");
+      }
+    }
+
+    if (!groups.default_group.empty()) {
+      const bool found = std::ranges::any_of(groups.groups, [&](const auto &group) {
+        return group.is_window_capture() && group.name == groups.default_group;
+      });
+      if (!found) {
+        errors.emplace_back("default_group '" + groups.default_group + "' does not match any window capture group");
+      }
+    }
 
     for (const auto &group : groups.groups) {
       if (group.name.empty()) {
@@ -147,12 +282,6 @@ namespace session_group {
         errors.emplace_back("invalid capture backend for group '" + group.name + "': " + group.capture);
       }
 
-      if (group.port == 0) {
-        errors.emplace_back("session group '" + group.name + "' must define a non-zero port");
-      } else if (!ports.insert(group.port).second) {
-        errors.emplace_back("duplicate port for session group '" + group.name + "': " + std::to_string(group.port));
-      }
-
       if (group.capture == CAPTURE_WINDOW && group.hwnd == 0 && group.rules.empty()) {
         errors.emplace_back("window capture group '" + group.name + "' must define at least one matching rule or a group-level hwnd");
       }
@@ -162,7 +291,7 @@ namespace session_group {
   }
 
   bool is_cli_option(const std::string_view &name) {
-    return name == "group" || name == "capture" || name == "box" || name == "process" || name == "title" || name == "class" || name == "hwnd" || name == "port" || name == "config";
+    return name == "group" || name == "capture" || name == "box" || name == "process" || name == "title" || name == "class" || name == "hwnd" || name == "port" || name == "port-mode" || name == "port-range" || name == "default-group" || name == "config";
   }
 
   bool apply_cli_option(const std::string_view &name, const std::string_view &value, cli_options_t &opts) {
@@ -192,6 +321,12 @@ namespace session_group {
         BOOST_LOG(error) << "session_group: invalid --port value: "sv << value;
         return false;
       }
+    } else if (name == "port-mode") {
+      opts.port_mode = std::string {value};
+    } else if (name == "port-range") {
+      opts.port_range = std::string {value};
+    } else if (name == "default-group") {
+      opts.default_group = std::string {value};
     } else if (name == "config") {
       opts.config_file = std::filesystem::path {std::string {value}};
     } else {
@@ -203,37 +338,57 @@ namespace session_group {
 
   std::optional<groups_config_t> groups_from_cli(const cli_options_t &opts) {
     if (opts.config_file) {
-      return load_groups(*opts.config_file);
+      auto groups = load_groups(*opts.config_file);
+      if (!groups) {
+        return std::nullopt;
+      }
+      // Command-line options override the config file.
+      if (!opts.port_mode.empty()) {
+        groups->port_mode = opts.port_mode;
+      }
+      if (!opts.port_range.empty()) {
+        groups->port_range = opts.port_range;
+      }
+      if (!opts.default_group.empty()) {
+        groups->default_group = opts.default_group;
+      }
+      return groups;
     }
 
     const bool has_group_option = !opts.group_name.empty() || !opts.capture.empty() || !opts.box.empty() || !opts.process.empty() || !opts.title.empty() || !opts.window_class.empty() || opts.hwnd != 0 || opts.port.has_value();
-    if (!has_group_option) {
+    if (!has_group_option && opts.port_mode.empty() && opts.port_range.empty() && opts.default_group.empty()) {
       return groups_config_t {};
     }
 
-    if (opts.group_name.empty()) {
+    if (has_group_option && opts.group_name.empty()) {
       BOOST_LOG(error) << "session_group: --group is required when specifying a session group on the command line"sv;
       return std::nullopt;
     }
 
-    config_t group;
-    group.name = opts.group_name;
-    group.capture = opts.capture.empty() ? std::string {CAPTURE_WINDOW} : opts.capture;
-    group.port = opts.port.value_or(0);
-    group.hwnd = opts.hwnd;
-
-    window_rule_t rule;
-    rule.box = opts.box;
-    rule.process = opts.process;
-    rule.title = opts.title;
-    rule.window_class = opts.window_class;
-    rule.hwnd = opts.hwnd;
-    if (!rule.empty()) {
-      group.rules.emplace_back(std::move(rule));
-    }
-
     groups_config_t result;
-    result.groups.emplace_back(std::move(group));
+    result.port_mode = opts.port_mode;
+    result.port_range = opts.port_range;
+    result.default_group = opts.default_group;
+
+    if (has_group_option) {
+      config_t group;
+      group.name = opts.group_name;
+      group.capture = opts.capture.empty() ? std::string {CAPTURE_WINDOW} : opts.capture;
+      group.port = opts.port.value_or(0);
+      group.hwnd = opts.hwnd;
+
+      window_rule_t rule;
+      rule.box = opts.box;
+      rule.process = opts.process;
+      rule.title = opts.title;
+      rule.window_class = opts.window_class;
+      rule.hwnd = opts.hwnd;
+      if (!rule.empty()) {
+        group.rules.emplace_back(std::move(rule));
+      }
+
+      result.groups.emplace_back(std::move(group));
+    }
     return result;
   }
 
@@ -251,6 +406,29 @@ namespace session_group {
       active = group.name;
     }
     return active;
+  }
+
+  std::string resolve_launch_group(const std::string &requested) {
+    if (!requested.empty()) {
+      for (const auto &group : active_groups.groups) {
+        if (group.is_window_capture() && group.name == requested) {
+          return requested;
+        }
+      }
+      return {};
+    }
+
+    // A configured default group receives sessions without an explicit group.
+    if (!active_groups.default_group.empty()) {
+      for (const auto &group : active_groups.groups) {
+        if (group.is_window_capture() && group.name == active_groups.default_group) {
+          return active_groups.default_group;
+        }
+      }
+    }
+
+    // Without a default, a lone window group captures the session.
+    return resolve_active_window_group();
   }
 
 #ifdef _WIN32
@@ -419,7 +597,7 @@ namespace session_group {
    *
    * A rule matches when the window handle equals the rule's hwnd, or the
    * process name matches, or the title matches, or the class matches. The
-   * box field is intentionally ignored (resolved by the consumer).
+   * box field is accepted for compatibility but is intentionally ignored.
    *
    * @param rule Rule to test.
    * @param hwnd Window handle.

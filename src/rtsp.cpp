@@ -10,12 +10,14 @@ extern "C" {
 }
 
 // standard includes
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <format>
 #include <set>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 // lib includes
 #include <boost/asio.hpp>
@@ -28,6 +30,7 @@ extern "C" {
 #include "logging.h"
 #include "network.h"
 #include "rtsp.h"
+#include "session_group.h"
 #include "stream.h"
 #include "sync.h"
 #include "video.h"
@@ -474,20 +477,49 @@ namespace rtsp_stream {
     }
 
     /**
-     * @brief Bind the underlying socket or graphics resource to its target.
+     * @brief RTSP listener bound to a single port and optional session group.
+     *
+     * single-port mode owns one default listener (empty group); per-group-port
+     * mode adds one listener per window group.
+     */
+    struct listener_t {
+      /**
+       * @brief Construct a listener using the server's io context.
+       *
+       * @param io_context Shared ASIO io context.
+       */
+      listener_t(boost::asio::io_context &io_context):
+          acceptor {io_context},
+          raised_timer {io_context} {}
+
+      std::string group;  ///< Session group served by this listener; empty marks the default listener.
+      std::uint16_t port {0};  ///< Bound TCP port.
+      tcp::acceptor acceptor;  ///< Listening acceptor.
+      boost::asio::steady_timer raised_timer;  ///< Timeout for a pending launch session.
+      safe::event_t<std::shared_ptr<launch_session_t>> launch_event;  ///< Pending launch session for this listener.
+      std::shared_ptr<socket_t> next_socket;  ///< Socket armed for the next accept.
+    };
+
+    /**
+     * @brief Bind a listener to a port for an optional session group.
      *
      * @param af Address family used for socket creation or binding.
      * @param port TCP or UDP port number.
+     * @param group_name Session group served by this listener; empty for the default listener.
      * @param ec Error code returned by the asynchronous operation.
      * @return Network operation status.
      */
-    int bind(net::af_e af, std::uint16_t port, boost::system::error_code &ec) {
-      acceptor.open(af == net::IPV4 ? tcp::v4() : tcp::v6(), ec);
+    int bind(net::af_e af, std::uint16_t port, const std::string &group_name, boost::system::error_code &ec) {
+      auto listener = std::make_unique<listener_t>(io_context);
+      listener->group = group_name;
+      listener->port = port;
+
+      listener->acceptor.open(af == net::IPV4 ? tcp::v4() : tcp::v6(), ec);
       if (ec) {
         return -1;
       }
 
-      acceptor.set_option(boost::asio::socket_base::reuse_address {true});
+      listener->acceptor.set_option(boost::asio::socket_base::reuse_address {true});
 
       auto bind_addr_str = net::get_bind_address(af);
       const auto bind_addr = boost::asio::ip::make_address(bind_addr_str, ec);
@@ -496,24 +528,26 @@ namespace rtsp_stream {
         return -1;
       }
 
-      acceptor.bind(tcp::endpoint(bind_addr, port), ec);
+      listener->acceptor.bind(tcp::endpoint(bind_addr, port), ec);
       if (ec) {
         return -1;
       }
 
-      acceptor.listen(4096, ec);
+      listener->acceptor.listen(4096, ec);
       if (ec) {
         return -1;
       }
 
-      next_socket = std::make_shared<socket_t>(io_context, [this](tcp::socket &sock, launch_session_t &session, msg_t &&msg) {
+      listener->next_socket = std::make_shared<socket_t>(io_context, [this](tcp::socket &sock, launch_session_t &session, msg_t &&msg) {
         handle_msg(sock, session, std::move(msg));
       });
 
-      acceptor.async_accept(next_socket->sock, [this](const auto &ec) {
-        handle_accept(ec);
+      auto *raw = listener.get();
+      listener->acceptor.async_accept(listener->next_socket->sock, [this, raw](const auto &ec) {
+        handle_accept(raw, ec);
       });
 
+      listeners_.emplace_back(std::move(listener));
       return 0;
     }
 
@@ -537,29 +571,30 @@ namespace rtsp_stream {
     }
 
     /**
-     * @brief Accept a pending connection and arm the server for the next client.
+     * @brief Accept a pending connection and arm the listener for the next client.
      *
+     * @param listener Listener that received the connection.
      * @param ec Error code returned by the asynchronous operation.
      */
-    void handle_accept(const boost::system::error_code &ec) {
+    void handle_accept(listener_t *listener, const boost::system::error_code &ec) {
       if (ec) {
-        BOOST_LOG(error) << "Couldn't accept incoming connections: "sv << ec.message();
+        BOOST_LOG(error) << "Couldn't accept incoming connections on port " << listener->port << ": " << ec.message();
 
         // Stop server
-        clear();
+        stop();
         return;
       }
 
-      auto socket = std::move(next_socket);
+      auto socket = std::move(listener->next_socket);
 
-      auto launch_session {launch_event.view(0s)};
+      auto launch_session {listener->launch_event.view(0s)};
       if (launch_session) {
         // Associate the current RTSP session with this socket and start reading
         socket->session = launch_session;
         socket->read();
       } else {
         // This can happen due to normal things like port scanning, so let's not make these visible by default
-        BOOST_LOG(debug) << "No pending session for incoming RTSP connection"sv;
+        BOOST_LOG(debug) << "No pending session for incoming RTSP connection on port " << listener->port;
 
         // If there is no session pending, close the connection immediately
         boost::system::error_code ec;
@@ -567,11 +602,12 @@ namespace rtsp_stream {
       }
 
       // Queue another asynchronous accept for the next incoming connection
-      next_socket = std::make_shared<socket_t>(io_context, [this](tcp::socket &sock, launch_session_t &session, msg_t &&msg) {
+      listener->next_socket = std::make_shared<socket_t>(io_context, [this](tcp::socket &sock, launch_session_t &session, msg_t &&msg) {
         handle_msg(sock, session, std::move(msg));
       });
-      acceptor.async_accept(next_socket->sock, [this](const auto &ec) {
-        handle_accept(ec);
+      auto *raw = listener;
+      listener->acceptor.async_accept(listener->next_socket->sock, [this, raw](const auto &ec) {
+        handle_accept(raw, ec);
       });
     }
 
@@ -586,25 +622,68 @@ namespace rtsp_stream {
     }
 
     /**
+     * @brief Find the listener serving a session group.
+     *
+     * A single listener (single-port mode) serves every session regardless of
+     * group, because there is only one shared acceptor. With multiple
+     * listeners (per-group-port mode), a non-empty group selects the matching
+     * group listener and an empty group selects the default listener.
+     *
+     * @param group_name Session group name; empty for the default listener.
+     * @return Matching listener, or nullptr when none exists.
+     */
+    listener_t *find_listener(const std::string &group_name) {
+      if (listeners_.empty()) {
+        return nullptr;
+      }
+      if (listeners_.size() == 1) {
+        // single-port: the lone shared listener accepts every session.
+        return listeners_.front().get();
+      }
+
+      if (!group_name.empty()) {
+        for (auto &listener : listeners_) {
+          if (listener->group == group_name) {
+            return listener.get();
+          }
+        }
+        return nullptr;
+      }
+
+      for (auto &listener : listeners_) {
+        if (listener->group.empty()) {
+          return listener.get();
+        }
+      }
+      return nullptr;
+    }
+
+    /**
      * @brief Launch a new streaming session.
      * @note If the client does not begin streaming within the ping_timeout,
      *       the session will be discarded.
      * @param launch_session Streaming session information.
      */
     void session_raise(std::shared_ptr<launch_session_t> launch_session) {
+      auto *listener = find_listener(launch_session->group);
+      if (!listener) {
+        BOOST_LOG(error) << "No RTSP listener for session group [" << launch_session->group << "], discarding launch session"sv;
+        return;
+      }
+
       // If a launch event is still pending, don't overwrite it.
-      if (launch_event.view(0s)) {
+      if (listener->launch_event.view(0s)) {
         return;
       }
 
       // Raise the new launch session to prepare for the RTSP handshake
-      launch_event.raise(std::move(launch_session));
+      listener->launch_event.raise(std::move(launch_session));
 
       // Arm the timer to expire this launch session if the client times out
-      raised_timer.expires_after(config::stream.ping_timeout);
-      raised_timer.async_wait([this](const boost::system::error_code &ec) {
+      listener->raised_timer.expires_after(config::stream.ping_timeout);
+      listener->raised_timer.async_wait([listener](const boost::system::error_code &ec) {
         if (!ec) {
-          auto discarded = launch_event.pop(0s);
+          auto discarded = listener->launch_event.pop(0s);
           if (discarded) {
             BOOST_LOG(debug) << "Event timeout: "sv << discarded->unique_id;
           }
@@ -617,16 +696,14 @@ namespace rtsp_stream {
      * @param launch_session_id The ID of the session to clear.
      */
     void session_clear(uint32_t launch_session_id) {
-      // We currently only support a single pending RTSP session,
-      // so the ID should always match the one for that session.
-      auto launch_session = launch_event.view(0s);
-      if (launch_session) {
-        if (launch_session->id != launch_session_id) {
-          BOOST_LOG(error) << "Attempted to clear unexpected session: "sv << launch_session_id << " vs "sv << launch_session->id;
-        } else {
-          raised_timer.cancel();
-          launch_event.pop();
+      for (auto &listener : listeners_) {
+        auto launch_session = listener->launch_event.view(0s);
+        if (!launch_session || launch_session->id != launch_session_id) {
+          continue;
         }
+        listener->raised_timer.cancel();
+        listener->launch_event.pop();
+        return;
       }
     }
 
@@ -719,7 +796,9 @@ namespace rtsp_stream {
      * @brief Stop the RTSP server.
      */
     void stop() {
-      acceptor.close();
+      for (auto &listener : listeners_) {
+        listener->acceptor.close();
+      }
       io_context.stop();
       clear();
     }
@@ -730,10 +809,7 @@ namespace rtsp_stream {
     sync_util::sync_t<std::set<std::shared_ptr<stream::session_t>>> _session_slots;
 
     boost::asio::io_context io_context;
-    tcp::acceptor acceptor {io_context};
-    boost::asio::steady_timer raised_timer {io_context};
-
-    std::shared_ptr<socket_t> next_socket;
+    std::vector<std::unique_ptr<listener_t>> listeners_;
   };
 
   rtsp_server_t server {};  ///< Singleton RTSP server used by GameStream launch sessions.
@@ -1343,11 +1419,58 @@ namespace rtsp_stream {
     server.map("PLAY"sv, &cmd_play);
 
     boost::system::error_code ec;
-    if (server.bind(net::af_from_enum_string(config::sunshine.address_family), net::map_port(rtsp_stream::RTSP_SETUP_PORT), ec)) {
+    const auto af = net::af_from_enum_string(config::sunshine.address_family);
+
+    // Always bind the default listener on the official RTSP port so that
+    // unnamed sessions (stock monitor streaming) keep working.
+    if (server.bind(af, net::map_port(rtsp_stream::RTSP_SETUP_PORT), "", ec)) {
       BOOST_LOG(fatal) << "Couldn't bind RTSP server to port ["sv << net::map_port(rtsp_stream::RTSP_SETUP_PORT) << "], " << ec.message();
       shutdown_event->raise(true);
 
       return;
+    }
+
+    // per-group-port: bind one extra listener per window group, assigning a
+    // port from the configured range in ascending order.
+    if (session_group::active_groups.port_mode == session_group::PORT_MODE_PER_GROUP) {
+      auto bounds = session_group::parse_port_range(session_group::active_groups.port_range);
+      if (!bounds) {
+        BOOST_LOG(fatal) << "Invalid port_range ["sv << session_group::active_groups.port_range << "]"sv;
+        shutdown_event->raise(true);
+        return;
+      }
+      session_group::port_allocator_t allocator {bounds->first, bounds->second};
+
+      // The configured default group takes the first port of the range; the
+      // remaining window groups follow in configuration order.
+      std::vector<const session_group::config_t *> window_groups;
+      window_groups.reserve(session_group::active_groups.groups.size());
+      for (const auto &group : session_group::active_groups.groups) {
+        if (group.is_window_capture()) {
+          window_groups.push_back(&group);
+        }
+      }
+      std::stable_sort(window_groups.begin(), window_groups.end(), [](const session_group::config_t *lhs, const session_group::config_t *rhs) {
+        const bool lhs_default = lhs->name == session_group::active_groups.default_group;
+        const bool rhs_default = rhs->name == session_group::active_groups.default_group;
+        return lhs_default && !rhs_default;
+      });
+
+      for (const auto *group : window_groups) {
+        auto port = allocator.allocate();
+        if (!port) {
+          BOOST_LOG(fatal) << "Cannot create more session groups than ports in the range ["sv << session_group::active_groups.port_range << "]"sv;
+          shutdown_event->raise(true);
+          return;
+        }
+        if (server.bind(af, *port, group->name, ec)) {
+          BOOST_LOG(fatal) << "Couldn't bind RTSP server for group ["sv << group->name << "] to port ["sv << *port << "], " << ec.message();
+          shutdown_event->raise(true);
+          return;
+        }
+        session_group::register_group_port(group->name, *port);
+        BOOST_LOG(info) << "Session group ["sv << group->name << "] listening on RTSP port "sv << *port;
+      }
     }
 
     std::jthread rtsp_thread {[&shutdown_event] {

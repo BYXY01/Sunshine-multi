@@ -552,7 +552,7 @@ namespace platf::dxgi {
     HRESULT status;
 
     // If the captured window has been destroyed, stop the session instead of
-    // re-selecting another window: the box/application is gone.
+    // re-selecting another window: the captured application is gone.
     if (!IsWindow(hwnd)) {
       BOOST_LOG(warning) << "Window capture: captured window was closed, stopping stream"sv;
       return capture_e::error;

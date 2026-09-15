@@ -7,6 +7,8 @@
 #include "../tests_common.h"
 
 // standard includes
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <string_view>
 
@@ -29,6 +31,8 @@ namespace {
      */
     std::string_view valid_groups_json() const {
       return R"({
+        "port_mode": "per-group-port",
+        "port_range": "48010-48100",
         "session_groups": [
           {
             "name": "user1-notepad",
@@ -62,6 +66,8 @@ TEST_F(SessionGroupTest, ParsesValidGroupConfiguration) {
   auto groups = session_group::parse_groups(valid_groups_json());
   ASSERT_TRUE(groups.has_value());
   ASSERT_EQ(groups->groups.size(), 2);
+  EXPECT_EQ(groups->port_mode, session_group::PORT_MODE_PER_GROUP);
+  EXPECT_EQ(groups->port_range, "48010-48100");
 
   const auto &first = groups->groups[0];
   EXPECT_EQ(first.name, "user1-notepad");
@@ -177,25 +183,26 @@ TEST_F(SessionGroupTest, SkipsEmptyRules) {
   EXPECT_EQ(groups->groups[0].rules[0].box, "cap_box");
 }
 
-TEST_F(SessionGroupTest, ValidatesUniqueNamesAndPorts) {
+TEST_F(SessionGroupTest, ValidatesUniqueNames) {
   auto groups = session_group::parse_groups(R"({
+    "port_mode": "single-port",
     "session_groups": [
-      {"name": "dup", "capture": "monitor", "port": 48010},
-      {"name": "dup", "capture": "monitor", "port": 48010}
+      {"name": "dup", "capture": "monitor"},
+      {"name": "dup", "capture": "monitor"}
     ]
   })"sv);
   ASSERT_TRUE(groups.has_value());
 
   auto errors = session_group::validate_groups(*groups);
-  ASSERT_EQ(errors.size(), 2);
+  ASSERT_EQ(errors.size(), 1);
   EXPECT_NE(std::find(errors.begin(), errors.end(), "duplicate session group name: dup"), errors.end());
-  EXPECT_NE(std::find(errors.begin(), errors.end(), "duplicate port for session group 'dup': 48010"), errors.end());
 }
 
 TEST_F(SessionGroupTest, ValidatesWindowGroupRequiresRulesOrHwnd) {
   auto groups = session_group::parse_groups(R"({
+    "port_mode": "single-port",
     "session_groups": [
-      {"name": "no-rules", "capture": "window", "port": 48010}
+      {"name": "no-rules", "capture": "window"}
     ]
   })"sv);
   ASSERT_TRUE(groups.has_value());
@@ -205,16 +212,18 @@ TEST_F(SessionGroupTest, ValidatesWindowGroupRequiresRulesOrHwnd) {
   EXPECT_EQ(errors[0], "window capture group 'no-rules' must define at least one matching rule or a group-level hwnd");
 
   auto with_hwnd = session_group::parse_groups(R"({
+    "port_mode": "single-port",
     "session_groups": [
-      {"name": "hwnd-ok", "capture": "window", "port": 48010, "hwnd": "0x4D2"}
+      {"name": "hwnd-ok", "capture": "window", "hwnd": "0x4D2"}
     ]
   })"sv);
   ASSERT_TRUE(with_hwnd.has_value());
   EXPECT_TRUE(session_group::validate_groups(*with_hwnd).empty());
 
   auto with_rule = session_group::parse_groups(R"({
+    "port_mode": "single-port",
     "session_groups": [
-      {"name": "rule-ok", "capture": "window", "port": 48010, "rules": [{"process": "x.exe"}]}
+      {"name": "rule-ok", "capture": "window", "rules": [{"process": "x.exe"}]}
     ]
   })"sv);
   ASSERT_TRUE(with_rule.has_value());
@@ -223,8 +232,9 @@ TEST_F(SessionGroupTest, ValidatesWindowGroupRequiresRulesOrHwnd) {
 
 TEST_F(SessionGroupTest, ValidatesInvalidCaptureBackend) {
   auto groups = session_group::parse_groups(R"({
+    "port_mode": "single-port",
     "session_groups": [
-      {"name": "bad-capture", "capture": "hologram", "port": 48010, "rules": [{"process": "x.exe"}]}
+      {"name": "bad-capture", "capture": "hologram", "rules": [{"process": "x.exe"}]}
     ]
   })"sv);
   ASSERT_TRUE(groups.has_value());
@@ -234,17 +244,105 @@ TEST_F(SessionGroupTest, ValidatesInvalidCaptureBackend) {
   EXPECT_EQ(errors[0], "invalid capture backend for group 'bad-capture': hologram");
 }
 
-TEST_F(SessionGroupTest, ValidatesZeroPort) {
+TEST_F(SessionGroupTest, ValidationRequiresExplicitPortMode) {
   auto groups = session_group::parse_groups(R"({
     "session_groups": [
-      {"name": "no-port", "capture": "window", "port": 0, "rules": [{"process": "x.exe"}]}
+      {"name": "no-mode", "capture": "window", "rules": [{"process": "x.exe"}]}
     ]
   })"sv);
   ASSERT_TRUE(groups.has_value());
 
   auto errors = session_group::validate_groups(*groups);
   ASSERT_EQ(errors.size(), 1);
-  EXPECT_EQ(errors[0], "session group 'no-port' must define a non-zero port");
+  EXPECT_EQ(errors[0], "port_mode must be explicitly set to 'single-port' or 'per-group-port'");
+}
+
+TEST_F(SessionGroupTest, ValidationRejectsUnknownPortMode) {
+  auto groups = session_group::parse_groups(R"({
+    "port_mode": "hybrid",
+    "session_groups": [
+      {"name": "bad-mode", "capture": "window", "rules": [{"process": "x.exe"}]}
+    ]
+  })"sv);
+  ASSERT_TRUE(groups.has_value());
+
+  auto errors = session_group::validate_groups(*groups);
+  ASSERT_EQ(errors.size(), 1);
+  EXPECT_EQ(errors[0], "invalid port_mode 'hybrid' (expected 'single-port' or 'per-group-port')");
+}
+
+TEST_F(SessionGroupTest, PerGroupPortRequiresPortRange) {
+  auto groups = session_group::parse_groups(R"({
+    "port_mode": "per-group-port",
+    "session_groups": [
+      {"name": "no-range", "capture": "window", "rules": [{"process": "x.exe"}]}
+    ]
+  })"sv);
+  ASSERT_TRUE(groups.has_value());
+
+  auto errors = session_group::validate_groups(*groups);
+  ASSERT_EQ(errors.size(), 1);
+  EXPECT_EQ(errors[0], "port_mode 'per-group-port' requires a non-empty port_range (e.g. \"48010-48100\")");
+}
+
+TEST_F(SessionGroupTest, PerGroupPortRejectsMalformedRange) {
+  auto groups = session_group::parse_groups(R"({
+    "port_mode": "per-group-port",
+    "port_range": "48010",
+    "session_groups": [
+      {"name": "bad-range", "capture": "window", "rules": [{"process": "x.exe"}]}
+    ]
+  })"sv);
+  ASSERT_TRUE(groups.has_value());
+
+  auto errors = session_group::validate_groups(*groups);
+  ASSERT_EQ(errors.size(), 1);
+  EXPECT_EQ(errors[0], "invalid port_range '48010' (expected \"start-end\" with 1 <= start <= end <= 65535)");
+}
+
+TEST_F(SessionGroupTest, PerGroupPortRejectsTooManyGroups) {
+  auto groups = session_group::parse_groups(R"({
+    "port_mode": "per-group-port",
+    "port_range": "48010-48011",
+    "session_groups": [
+      {"name": "a", "capture": "window", "rules": [{"process": "a.exe"}]},
+      {"name": "b", "capture": "window", "rules": [{"process": "b.exe"}]},
+      {"name": "c", "capture": "window", "rules": [{"process": "c.exe"}]}
+    ]
+  })"sv);
+  ASSERT_TRUE(groups.has_value());
+
+  auto errors = session_group::validate_groups(*groups);
+  ASSERT_EQ(errors.size(), 1);
+  EXPECT_EQ(errors[0], "too many session groups (3) for port_range '48010-48011'; the range size limits the maximum number of groups");
+}
+
+TEST_F(SessionGroupTest, ParsesDefaultGroup) {
+  auto groups = session_group::parse_groups(R"({
+    "port_mode": "single-port",
+    "default_group": "user1-notepad",
+    "session_groups": [
+      {"name": "user1-notepad", "capture": "window", "rules": [{"process": "notepad.exe"}]}
+    ]
+  })"sv);
+  ASSERT_TRUE(groups.has_value());
+  EXPECT_EQ(groups->default_group, "user1-notepad");
+  EXPECT_TRUE(session_group::validate_groups(*groups).empty());
+}
+
+TEST_F(SessionGroupTest, ValidationRejectsUnknownDefaultGroup) {
+  auto groups = session_group::parse_groups(R"({
+    "port_mode": "single-port",
+    "default_group": "ghost",
+    "session_groups": [
+      {"name": "real", "capture": "window", "rules": [{"process": "x.exe"}]}
+    ]
+  })"sv);
+  ASSERT_TRUE(groups.has_value());
+
+  auto errors = session_group::validate_groups(*groups);
+  ASSERT_EQ(errors.size(), 1);
+  EXPECT_EQ(errors[0], "default_group 'ghost' does not match any window capture group");
 }
 
 TEST_F(SessionGroupTest, ValidGroupsProduceNoErrors) {
@@ -262,6 +360,9 @@ TEST(SessionGroupCliTest, RecognizesGroupOptions) {
   EXPECT_TRUE(session_group::is_cli_option("class"));
   EXPECT_TRUE(session_group::is_cli_option("hwnd"));
   EXPECT_TRUE(session_group::is_cli_option("port"));
+  EXPECT_TRUE(session_group::is_cli_option("port-mode"));
+  EXPECT_TRUE(session_group::is_cli_option("port-range"));
+  EXPECT_TRUE(session_group::is_cli_option("default-group"));
   EXPECT_TRUE(session_group::is_cli_option("config"));
   EXPECT_FALSE(session_group::is_cli_option("help"));
   EXPECT_FALSE(session_group::is_cli_option("creds"));
@@ -277,6 +378,9 @@ TEST(SessionGroupCliTest, AppliesValidOptions) {
   EXPECT_TRUE(session_group::apply_cli_option("class", "#32770", opts));
   EXPECT_TRUE(session_group::apply_cli_option("hwnd", "0x4D2", opts));
   EXPECT_TRUE(session_group::apply_cli_option("port", "48010", opts));
+  EXPECT_TRUE(session_group::apply_cli_option("port-mode", "per-group-port", opts));
+  EXPECT_TRUE(session_group::apply_cli_option("port-range", "48010-48100", opts));
+  EXPECT_TRUE(session_group::apply_cli_option("default-group", "user1-notepad", opts));
   EXPECT_TRUE(session_group::apply_cli_option("config", "session-groups.json", opts));
 
   EXPECT_EQ(opts.group_name, "user1-notepad");
@@ -288,6 +392,9 @@ TEST(SessionGroupCliTest, AppliesValidOptions) {
   EXPECT_EQ(opts.hwnd, 0x4D2);
   ASSERT_TRUE(opts.port.has_value());
   EXPECT_EQ(*opts.port, 48010);
+  EXPECT_EQ(opts.port_mode, "per-group-port");
+  EXPECT_EQ(opts.port_range, "48010-48100");
+  EXPECT_EQ(opts.default_group, "user1-notepad");
   ASSERT_TRUE(opts.config_file.has_value());
   EXPECT_EQ(opts.config_file->string(), "session-groups.json");
 }
@@ -355,6 +462,130 @@ TEST(SessionGroupCliTest, ReturnsEmptyGroupsWithoutOptions) {
   EXPECT_TRUE(groups->groups.empty());
 }
 
+TEST(SessionGroupCliTest, BuildsGroupsConfigWithPortModeFromOptions) {
+  session_group::cli_options_t opts;
+  opts.port_mode = "per-group-port";
+  opts.port_range = "48010-48100";
+
+  auto groups = session_group::groups_from_cli(opts);
+  ASSERT_TRUE(groups.has_value());
+  EXPECT_TRUE(groups->groups.empty());
+  EXPECT_EQ(groups->port_mode, "per-group-port");
+  EXPECT_EQ(groups->port_range, "48010-48100");
+}
+
+TEST(SessionGroupCliTest, CliOverridesConfigFilePortMode) {
+  auto path = std::filesystem::temp_directory_path() / "sunshine_test_session_groups_override.json";
+  {
+    std::ofstream file {path};
+    file << R"({
+      "port_mode": "single-port",
+      "session_groups": [
+        {"name": "cfg-group", "capture": "window", "rules": [{"process": "x.exe"}]}
+      ]
+    })";
+  }
+
+  session_group::cli_options_t opts;
+  opts.config_file = path;
+  opts.port_mode = "per-group-port";
+  opts.port_range = "48010-48100";
+  opts.default_group = "cfg-group";
+
+  auto groups = session_group::groups_from_cli(opts);
+  std::filesystem::remove(path);
+  ASSERT_TRUE(groups.has_value());
+  EXPECT_EQ(groups->groups.size(), 1);
+  EXPECT_EQ(groups->groups[0].name, "cfg-group");
+  EXPECT_EQ(groups->port_mode, "per-group-port");
+  EXPECT_EQ(groups->port_range, "48010-48100");
+  EXPECT_EQ(groups->default_group, "cfg-group");
+}
+
+TEST(SessionGroupParsePortRangeTest, ParsesValidRanges) {
+  auto range = session_group::parse_port_range("48010-48100");
+  ASSERT_TRUE(range.has_value());
+  EXPECT_EQ(range->first, 48010);
+  EXPECT_EQ(range->second, 48100);
+
+  auto single = session_group::parse_port_range("47989-47989");
+  ASSERT_TRUE(single.has_value());
+  EXPECT_EQ(single->first, 47989);
+  EXPECT_EQ(single->second, 47989);
+}
+
+TEST(SessionGroupParsePortRangeTest, RejectsMalformedRanges) {
+  EXPECT_FALSE(session_group::parse_port_range("").has_value());
+  EXPECT_FALSE(session_group::parse_port_range("48010").has_value());
+  EXPECT_FALSE(session_group::parse_port_range("48010-").has_value());
+  EXPECT_FALSE(session_group::parse_port_range("-48100").has_value());
+  EXPECT_FALSE(session_group::parse_port_range("48100-48010").has_value());
+  EXPECT_FALSE(session_group::parse_port_range("0-48010").has_value());
+  EXPECT_FALSE(session_group::parse_port_range("48010-65536").has_value());
+  EXPECT_FALSE(session_group::parse_port_range("abc-def").has_value());
+}
+
+TEST(SessionGroupPortAllocatorTest, AllocatesSmallestFreePortFirst) {
+  session_group::port_allocator_t allocator {48010, 48012};
+  EXPECT_EQ(allocator.size(), 3);
+  EXPECT_EQ(allocator.available(), 3);
+
+  EXPECT_EQ(*allocator.allocate(), 48010);
+  EXPECT_EQ(*allocator.allocate(), 48011);
+  EXPECT_EQ(*allocator.allocate(), 48012);
+  EXPECT_EQ(allocator.available(), 0);
+  EXPECT_FALSE(allocator.allocate().has_value());
+}
+
+TEST(SessionGroupPortAllocatorTest, ReleasesAndReusesPorts) {
+  session_group::port_allocator_t allocator {48010, 48012};
+  ASSERT_EQ(*allocator.allocate(), 48010);
+  ASSERT_EQ(*allocator.allocate(), 48011);
+
+  allocator.release(48010);
+  EXPECT_EQ(allocator.available(), 2);
+  // The smallest free port is reused.
+  EXPECT_EQ(*allocator.allocate(), 48010);
+}
+
+TEST(SessionGroupPortAllocatorTest, ReleaseOutOfRangeIsIgnored) {
+  session_group::port_allocator_t allocator {48010, 48012};
+  allocator.release(9999);
+  EXPECT_EQ(allocator.available(), 3);
+  EXPECT_EQ(*allocator.allocate(), 48010);
+}
+
+TEST(SessionGroupPortAllocatorTest, SinglePortRange) {
+  session_group::port_allocator_t allocator {47989, 47989};
+  EXPECT_EQ(allocator.size(), 1);
+  EXPECT_EQ(*allocator.allocate(), 47989);
+  EXPECT_FALSE(allocator.allocate().has_value());
+}
+
+TEST(SessionGroupPortAllocatorTest, HandlesUpperPortBound) {
+  // next_hint_ must not overflow when the last port of the range is allocated.
+  session_group::port_allocator_t allocator {65534, 65535};
+  EXPECT_EQ(*allocator.allocate(), 65534);
+  EXPECT_EQ(*allocator.allocate(), 65535);
+  EXPECT_EQ(allocator.available(), 0);
+  EXPECT_FALSE(allocator.allocate().has_value());
+
+  allocator.release(65534);
+  EXPECT_EQ(*allocator.allocate(), 65534);
+}
+
+TEST(SessionGroupPortForGroupTest, ReturnsRegisteredPort) {
+  session_group::clear_group_ports();
+  EXPECT_FALSE(session_group::port_for_group("user1").has_value());
+
+  session_group::register_group_port("user1", 48010);
+  EXPECT_EQ(*session_group::port_for_group("user1"), 48010);
+  EXPECT_FALSE(session_group::port_for_group("unknown").has_value());
+
+  session_group::clear_group_ports();
+  EXPECT_FALSE(session_group::port_for_group("user1").has_value());
+}
+
 namespace {
 
   /**
@@ -398,6 +629,63 @@ TEST(SessionGroupResolveActiveTest, ReturnsEmptyForMultipleWindowGroups) {
   session_group::active_groups.groups.emplace_back(session_group::config_t {"b", std::string {session_group::CAPTURE_WINDOW}, 48011, 0x4D3, {}, {}, {}, 60, 0});
 
   EXPECT_TRUE(session_group::resolve_active_window_group().empty());
+}
+
+TEST(SessionGroupResolveLaunchTest, HonorsExplicitGroupName) {
+  ActiveGroupsGuard guard;
+  session_group::active_groups = session_group::groups_config_t {};
+  session_group::active_groups.groups.emplace_back(session_group::config_t {"a", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, {}, 60, 0});
+
+  EXPECT_EQ(session_group::resolve_launch_group("a"), "a");
+  EXPECT_TRUE(session_group::resolve_launch_group("missing").empty());
+}
+
+TEST(SessionGroupResolveLaunchTest, FallsBackToSingleWindowGroup) {
+  ActiveGroupsGuard guard;
+  session_group::active_groups = session_group::groups_config_t {};
+  session_group::active_groups.groups.emplace_back(session_group::config_t {"user1", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, {}, 60, 20000});
+
+  EXPECT_EQ(session_group::resolve_launch_group(""), "user1");
+}
+
+TEST(SessionGroupResolveLaunchTest, ReturnsEmptyForMultipleGroupsWithoutExplicitName) {
+  ActiveGroupsGuard guard;
+  session_group::active_groups = session_group::groups_config_t {};
+  session_group::active_groups.groups.emplace_back(session_group::config_t {"a", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, {}, 60, 0});
+  session_group::active_groups.groups.emplace_back(session_group::config_t {"b", std::string {session_group::CAPTURE_WINDOW}, 48011, 0x4D3, {}, {}, {}, 60, 0});
+
+  EXPECT_TRUE(session_group::resolve_launch_group("").empty());
+}
+
+TEST(SessionGroupResolveLaunchTest, UsesConfiguredDefaultGroup) {
+  ActiveGroupsGuard guard;
+  session_group::active_groups = session_group::groups_config_t {};
+  session_group::active_groups.default_group = "b";
+  session_group::active_groups.groups.emplace_back(session_group::config_t {"a", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, {}, 60, 0});
+  session_group::active_groups.groups.emplace_back(session_group::config_t {"b", std::string {session_group::CAPTURE_WINDOW}, 48011, 0x4D3, {}, {}, {}, 60, 0});
+
+  EXPECT_EQ(session_group::resolve_launch_group(""), "b");
+  // An explicit group still wins over the default.
+  EXPECT_EQ(session_group::resolve_launch_group("a"), "a");
+}
+
+TEST(SessionGroupResolveLaunchTest, IgnoresUnknownDefaultGroup) {
+  ActiveGroupsGuard guard;
+  session_group::active_groups = session_group::groups_config_t {};
+  session_group::active_groups.default_group = "ghost";
+  session_group::active_groups.groups.emplace_back(session_group::config_t {"a", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, {}, 60, 0});
+
+  // "ghost" is not a configured window group, so the lone group wins.
+  EXPECT_EQ(session_group::resolve_launch_group(""), "a");
+}
+
+TEST(SessionGroupResolveLaunchTest, IgnoresNonWindowGroups) {
+  ActiveGroupsGuard guard;
+  session_group::active_groups = session_group::groups_config_t {};
+  session_group::active_groups.groups.emplace_back(session_group::config_t {"mon", std::string {session_group::CAPTURE_MONITOR}, 48010, 0, {}, {}, {}, 60, 0});
+
+  EXPECT_TRUE(session_group::resolve_launch_group("").empty());
+  EXPECT_TRUE(session_group::resolve_launch_group("mon").empty());
 }
 
 TEST(SessionGroupMatcherTest, GroupLevelHwndWinsImmediately) {
