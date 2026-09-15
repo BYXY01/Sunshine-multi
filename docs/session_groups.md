@@ -1,11 +1,10 @@
 # Session Groups (Window Capture)
 
 This fork adds multi-session window capture: one or more **session groups**
-group windows together, and each group is streamed over its own RTSP port
-(in `per-group-port` mode) or a shared port (in `single-port` mode), with
-its own capture thread. Different applications (or the same application for
-different users) can be captured and streamed independently and in
-parallel.
+group windows together, and each group is streamed over its own RTSP port /
+Moonlight session with its own capture thread. Different applications (or
+the same application for different users) can be captured and streamed
+independently and in parallel.
 
 ```
 group A (window capture) ── capture thread A ── display_t (compositing) ──► RTSP/session A
@@ -100,12 +99,19 @@ Session group [user1-notepad] listening on RTSP port 48010
 A group whose port cannot be allocated (the range is exhausted) is refused
 with an error instead of crashing.
 
-## Window capture backends
+## Window capture and popup composition
 
-Window capture is available with both hardware and software encoders:
-hardware encoders use the GPU-backed window backend, where frames stay in
-video memory and feed NVENC directly (no GPU→CPU round trip); software
-encoders use the RAM backend.
+When `capture` is `window`, the backend binds to the **process** owning the
+matched (anchor) window — regardless of which rule matched — and enumerates
+all visible top-level windows of that process every frame. Menus, dialogs,
+and tooltips opened by the application are composited onto the anchor
+window frame at their screen-relative offsets with alpha blending, so the
+full application appears in the stream. Windows whose class is listed in
+`aux_exclude` are filtered out.
+
+Hardware encoders use the GPU-backed window backend (frames stay in video
+memory); software encoders use the RAM backend (frames are composited on
+the CPU).
 
 ## Command line
 
@@ -124,8 +130,9 @@ encoders use the RAM backend.
 | `--port <number>` | Moonlight port for the session group. |
 | `--config <path>` | Load session groups from a JSON file. |
 
-Example:
+Examples:
 
 ```
+sunshine --port-mode single-port --group user1-notepad --capture window --process notepad.exe
 sunshine --port-mode per-group-port --port-range 48010-48100 --config session-groups.json
 ```

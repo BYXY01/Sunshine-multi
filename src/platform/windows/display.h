@@ -751,9 +751,12 @@ namespace platf::dxgi {
      * @param display Display object or identifier associated with the operation.
      * @param config Configuration values to apply.
      * @param hwnd Win32 window handle to capture.
+     * @param update_display_size When true, the display dimensions are set to
+     * the captured window size (used for the anchor window). Auxiliary windows
+     * must pass false so they do not overwrite the anchor dimensions.
      * @return 0 on success; nonzero or negative platform status on failure.
      */
-    int init_window(display_base_t *display, const ::video::config_t &config, HWND hwnd);
+    int init_window(display_base_t *display, const ::video::config_t &config, HWND hwnd, bool update_display_size = true);
     /**
      * @brief Shared capture session setup used by both monitor and window backends.
      *
@@ -853,15 +856,97 @@ namespace platf::dxgi {
   };
 
   /**
+   * @brief A window of the bound process captured for composition.
+   *
+   * Every visible top-level window of the process (the anchor window plus
+   * popups such as menus, dialogs, and tooltips) gets its own WGC capture
+   * item and is composited onto the anchor frame.
+   */
+  struct window_item_t {
+    wgc_capture_t wgc;  ///< WGC capture session for this window.
+    RECT rect {};  ///< Screen rectangle in logical pixels.
+    texture2d_t staging;  ///< Cached CPU-readable copy of the latest window frame.
+    bool has_frame {false};  ///< Whether a frame has been captured and cached.
+  };
+
+  /**
    * @brief Window compositing capture backend (software-encoded frames).
    *
    * Captures a single top-level window through the Windows.Graphics.Capture
    * API and exposes it as a RAM-backed `platf::display_t`. Unlike the
    * monitor-based backends, no DXGI output enumeration is required.
+   *
+   * Regardless of which rule (process / title / class / hwnd) matched, the
+   * backend binds to the process owning the anchor window and enumerates all
+   * visible top-level windows of that process every frame. Popups (menus,
+   * dialogs, tooltips) are composited onto the anchor window frame at their
+   * screen-relative offsets; windows whose class appears in `aux_exclude`
+   * are filtered out.
    */
   class display_window_t: public display_ram_t {
-    wgc_capture_t wgc;  ///< WGC window capture session.
-    HWND hwnd {nullptr};  ///< Window handle being captured; null after the window closes.
+    wgc_capture_t wgc;  ///< WGC capture session for the anchor window.
+    HWND hwnd {nullptr};  ///< Anchor window handle (matched by the group rules).
+    std::uint32_t pid {0};  ///< Process bound by the anchor window.
+    std::vector<std::string> aux_exclude;  ///< Window classes excluded from the frame.
+    ::video::config_t capture_config;  ///< Capture configuration retained for window-item creation.
+    std::map<HWND, std::unique_ptr<window_item_t>> windows;  ///< Captured windows of the process keyed by handle.
+
+    /**
+     * @brief Check whether a top-level window should be captured.
+     *
+     * A window is captured when it belongs to the bound process, is visible,
+     * is not the anchor window, and its class is not listed in `aux_exclude`.
+     *
+     * @param candidate Window handle to evaluate.
+     * @return True when the window should be added to the composition set.
+     */
+    bool should_capture(HWND candidate) const;
+    /**
+     * @brief Add a new window of the process to the composition set.
+     *
+     * @param candidate Window handle to attach.
+     * @return 0 on success; nonzero when the window cannot be captured.
+     */
+    int attach_window(HWND candidate);
+    /**
+     * @brief Remove a window from the composition set.
+     *
+     * @param candidate Window handle to detach.
+     */
+    void detach_window(HWND candidate);
+    /**
+     * @brief Re-enumerate the process windows and refresh the composition set.
+     *
+     * New visible windows are captured; windows that disappeared are removed.
+     *
+     * @return 0 on success; nonzero when the anchor window is gone.
+     */
+    int refresh_windows();
+    /**
+     * @brief Copy a window frame into the item's cached staging texture.
+     *
+     * The staging texture is (re)created to match the frame and receives a
+     * GPU copy of the window content, so a static popup can be re-composited
+     * on later frames without waiting for a new WGC frame.
+     *
+     * @param item Window whose cache is updated.
+     * @param src Window texture to copy from.
+     * @param src_desc Texture descriptor of the window frame.
+     * @return 0 on success; nonzero on failure.
+     */
+    int update_window_staging(window_item_t &item, ID3D11Texture2D *src, const D3D11_TEXTURE2D_DESC &src_desc);
+    /**
+     * @brief Composite a captured window's cached frame onto the anchor frame.
+     *
+     * The window's cached pixels are blitted onto the anchor image at the
+     * offset between the two windows' screen rectangles, clipped to the
+     * anchor bounds.
+     *
+     * @param img Anchor image buffer.
+     * @param item Window whose cached frame is composited.
+     * @return 0 on success; nonzero on failure.
+     */
+    int blit_window(img_t *img, window_item_t &item);
 
   public:
     /**
@@ -869,12 +954,17 @@ namespace platf::dxgi {
      *
      * @param config Configuration values to apply.
      * @param display_name Display name.
-     * @param hwnd Win32 window handle to capture.
+     * @param hwnd Anchor window handle matched by the group rules.
+     * @param aux_exclude Window classes excluded from the frame.
      * @return 0 on success; nonzero or negative platform status on failure.
      */
-    int init(const ::video::config_t &config, const std::string &display_name, HWND hwnd);
+    int init(const ::video::config_t &config, const std::string &display_name, HWND hwnd, const std::vector<std::string> &aux_exclude = {});
     /**
      * @brief Capture a window frame into the provided image object.
+     *
+     * The process windows are re-enumerated, the anchor window frame is
+     * captured as the background, and the remaining captured windows are
+     * composited onto it at their screen-relative offsets.
      *
      * @param pull_free_image_cb Callback that provides an available image buffer.
      * @param img_out Captured image buffer returned to the streaming pipeline.

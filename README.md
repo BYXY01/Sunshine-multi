@@ -25,16 +25,17 @@ LizardByte has the full documentation hosted on [Read the Docs](https://docs.liz
 
 This fork extends Sunshine with generic **multi-session window capture**:
 one or more *session groups* group windows together, and each group is
-streamed over its own RTSP port (or a shared port) with its own capture
-thread, so different applications can be captured and streamed
-independently.
+streamed over its own RTSP port / Moonlight session with its own capture
+thread, so different applications (or the same application for different
+users) can be captured and streamed independently and in parallel.
 
-Feature additions:
+Feature additions (step by step):
 
 | Step | Addition |
 |---|---|
 | 6.4-1 | **GPU window capture backend** — window frames stay in video memory and feed NVENC directly (no GPU→CPU round trip). Software encoders use the RAM backend. |
 | 6.4-2 | **Port modes** — `single-port` (all groups share RTSP port 47989, routed by group name) or `per-group-port` (one dedicated RTSP port per group, allocated from a `port_range`), plus a configurable default group. |
+| 6.4-3 | **Popup composition** — the backend binds to the process owning the matched window and composites all its visible top-level windows (menus, dialogs, tooltips) into one frame, so the full application appears in the stream. |
 
 Session groups are configured with a JSON file (`session-groups.json`) or
 command-line options (`--port-mode`, `--port-range`, `--default-group`,

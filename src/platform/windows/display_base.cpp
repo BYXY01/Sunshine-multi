@@ -1050,7 +1050,7 @@ namespace platf {
         }
       } else {
         auto disp = std::make_shared<dxgi::display_window_t>();
-        if (!disp->init(config, display_name, (HWND) target_hwnd)) {
+        if (!disp->init(config, display_name, (HWND) target_hwnd, selected_group->aux_exclude)) {
           return disp;
         }
       }
