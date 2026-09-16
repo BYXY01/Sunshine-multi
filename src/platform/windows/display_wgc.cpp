@@ -577,20 +577,42 @@ namespace platf::dxgi {
     return result;
   }
 
-  bool display_window_t::should_capture(HWND candidate) const {
-    if (candidate == nullptr || candidate == hwnd) {
+  window_capture_set_t::window_capture_set_t(display_base_t *display, const ::video::config_t &config, HWND anchor, const std::vector<std::string> &aux_exclude):
+      display_ {display},
+      anchor_ {anchor},
+      aux_exclude_ {aux_exclude},
+      config_ {config} {
+    DWORD process_id = 0;
+    GetWindowThreadProcessId(anchor_, &process_id);
+    pid_ = process_id;
+  }
+
+  HWND window_capture_set_t::anchor() const {
+    return anchor_;
+  }
+
+  std::size_t window_capture_set_t::size() const {
+    return windows_.size();
+  }
+
+  bool window_capture_set_t::empty() const {
+    return windows_.empty();
+  }
+
+  bool window_capture_set_t::should_capture(HWND candidate) const {
+    if (candidate == nullptr || candidate == anchor_) {
       return false;
     }
     DWORD window_pid = 0;
     GetWindowThreadProcessId(candidate, &window_pid);
-    if (window_pid != pid) {
+    if (window_pid != pid_) {
       return false;
     }
     if (!IsWindowVisible(candidate) || IsIconic(candidate)) {
       return false;
     }
     auto class_name = window_class_name_lower(candidate);
-    for (const auto &excluded : aux_exclude) {
+    for (const auto &excluded : aux_exclude_) {
       if (class_name == to_ascii_lower(excluded)) {
         return false;
       }
@@ -598,30 +620,30 @@ namespace platf::dxgi {
     return true;
   }
 
-  int display_window_t::attach_window(HWND candidate) {
-    if (windows.find(candidate) != windows.end()) {
+  int window_capture_set_t::attach_window(HWND candidate) {
+    if (windows_.find(candidate) != windows_.end()) {
       return 0;
     }
     // Keep the item on the heap: the WGC frame callback captures a pointer to
     // its `wgc_capture_t`, so the object must never be relocated.
     auto item = std::make_unique<window_item_t>();
-    if (item->wgc.init_window(this, capture_config, candidate, false)) {
+    if (item->wgc.init_window(display_, config_, candidate, false)) {
       BOOST_LOG(warning) << "Window capture: failed to attach popup 0x"sv << util::hex((std::uintptr_t) candidate).to_string_view();
       return -1;
     }
     GetWindowRect(candidate, &item->rect);
-    windows.emplace(candidate, std::move(item));
+    windows_.emplace(candidate, std::move(item));
     BOOST_LOG(info) << "Window capture: attached process window 0x"sv << util::hex((std::uintptr_t) candidate).to_string_view();
     return 0;
   }
 
-  void display_window_t::detach_window(HWND candidate) {
-    windows.erase(candidate);
+  void window_capture_set_t::detach_window(HWND candidate) {
+    windows_.erase(candidate);
     BOOST_LOG(info) << "Window capture: detached process window 0x"sv << util::hex((std::uintptr_t) candidate).to_string_view();
   }
 
-  int display_window_t::refresh_windows() {
-    if (!IsWindow(hwnd)) {
+  int window_capture_set_t::refresh() {
+    if (!IsWindow(anchor_)) {
       return -1;
     }
 
@@ -629,7 +651,7 @@ namespace platf::dxgi {
       std::uint32_t pid;  ///< Process ID to match.
       std::vector<HWND> present;  ///< Visible top-level windows of the process.
     };
-    enum_ctx_t ctx {pid, {}};
+    enum_ctx_t ctx {pid_, {}};
     EnumWindows([](HWND window, LPARAM lparam) -> BOOL {
       auto *data = reinterpret_cast<enum_ctx_t *>(lparam);
       DWORD window_pid = 0;
@@ -647,10 +669,10 @@ namespace platf::dxgi {
       }
     }
 
-    for (auto it = windows.begin(); it != windows.end();) {
+    for (auto it = windows_.begin(); it != windows_.end();) {
       const bool still_present = std::find(ctx.present.begin(), ctx.present.end(), it->first) != ctx.present.end();
       if (!still_present || !should_capture(it->first)) {
-        it = windows.erase(it);
+        it = windows_.erase(it);
       } else {
         ++it;
       }
@@ -658,7 +680,52 @@ namespace platf::dxgi {
     return 0;
   }
 
-  int display_window_t::update_window_staging(window_item_t &item, ID3D11Texture2D *src, const D3D11_TEXTURE2D_DESC &src_desc) {
+  void window_capture_set_t::window_position(const window_item_t &item, int anchor_width, int anchor_height, int &out_x, int &out_y, int &out_w, int &out_h) const {
+    RECT anchor_rect {};
+    GetWindowRect(anchor_, &anchor_rect);
+    const double scale_x = static_cast<double>(anchor_width) / static_cast<double>(std::max(1L, anchor_rect.right - anchor_rect.left));
+    const double scale_y = static_cast<double>(anchor_height) / static_cast<double>(std::max(1L, anchor_rect.bottom - anchor_rect.top));
+    out_x = static_cast<int>(std::llround((static_cast<double>(item.rect.left) - anchor_rect.left) * scale_x));
+    out_y = static_cast<int>(std::llround((static_cast<double>(item.rect.top) - anchor_rect.top) * scale_y));
+    out_w = static_cast<int>(std::llround(static_cast<double>(item.rect.right - item.rect.left) * scale_x));
+    out_h = static_cast<int>(std::llround(static_cast<double>(item.rect.bottom - item.rect.top) * scale_y));
+  }
+
+  int window_capture_set_t::update_window_cache(window_item_t &item, ID3D11Texture2D *src, const D3D11_TEXTURE2D_DESC &src_desc) {
+    // GPU cache used by the GPU composition path.
+    if (!item.texture) {
+      D3D11_TEXTURE2D_DESC t {};
+      t.Width = src_desc.Width;
+      t.Height = src_desc.Height;
+      t.MipLevels = 1;
+      t.ArraySize = 1;
+      t.SampleDesc.Count = 1;
+      t.Usage = D3D11_USAGE_DEFAULT;
+      t.Format = src_desc.Format;
+      t.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+      auto status = display_->device->CreateTexture2D(&t, nullptr, &item.texture);
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Window capture: failed to create popup texture [0x"sv << util::hex(status).to_string_view() << ']';
+        return -1;
+      }
+    }
+    D3D11_TEXTURE2D_DESC cache_desc;
+    item.texture->GetDesc(&cache_desc);
+    if (cache_desc.Width != src_desc.Width || cache_desc.Height != src_desc.Height || cache_desc.Format != src_desc.Format) {
+      item.texture.reset();
+      item.srv.reset();
+      return -1;
+    }
+    display_->device_ctx->CopyResource(item.texture.get(), src);
+    if (!item.srv) {
+      auto status = display_->device->CreateShaderResourceView(item.texture.get(), nullptr, &item.srv);
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Window capture: failed to create popup SRV [0x"sv << util::hex(status).to_string_view() << ']';
+        return -1;
+      }
+    }
+
+    // CPU staging cache used by the CPU fallback composition.
     if (!item.staging) {
       D3D11_TEXTURE2D_DESC t {};
       t.Width = src_desc.Width;
@@ -669,107 +736,156 @@ namespace platf::dxgi {
       t.Usage = D3D11_USAGE_STAGING;
       t.Format = src_desc.Format;
       t.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-      auto status = device->CreateTexture2D(&t, nullptr, &item.staging);
+      auto status = display_->device->CreateTexture2D(&t, nullptr, &item.staging);
       if (FAILED(status)) {
         BOOST_LOG(error) << "Window capture: failed to create popup staging texture [0x"sv << util::hex(status).to_string_view() << ']';
         return -1;
       }
     }
-
     D3D11_TEXTURE2D_DESC staging_desc;
     item.staging->GetDesc(&staging_desc);
     if (staging_desc.Width != src_desc.Width || staging_desc.Height != src_desc.Height || staging_desc.Format != src_desc.Format) {
       item.staging.reset();
-      item.has_frame = false;
       return -1;
     }
-
-    device_ctx->CopyResource(item.staging.get(), src);
+    display_->device_ctx->CopyResource(item.staging.get(), src);
     return 0;
   }
 
-  int display_window_t::blit_window(img_t *img, window_item_t &item) {
-    if (!item.staging || !item.has_frame || !img || img->pixel_pitch == 0 || img->row_pitch == 0) {
-      return -1;
-    }
+  int window_capture_set_t::capture_popups(bool cursor_visible, std::chrono::milliseconds timeout) {
+    for (auto &[window, item] : windows_) {
+      GetWindowRect(window, &item->rect);
 
-    D3D11_TEXTURE2D_DESC staging_desc;
-    item.staging->GetDesc(&staging_desc);
-
-    D3D11_MAPPED_SUBRESOURCE mapped {};
-    if (FAILED(device_ctx->Map(item.staging.get(), 0, D3D11_MAP_READ, 0, &mapped))) {
-      BOOST_LOG(error) << "Window capture: failed to map popup staging texture"sv;
-      return -1;
-    }
-    auto unmap = util::fail_guard([&]() {
-      device_ctx->Unmap(item.staging.get(), 0);
-    });
-
-    RECT anchor_rect {};
-    GetWindowRect(hwnd, &anchor_rect);
-    const double scale_x = static_cast<double>(width) / static_cast<double>(std::max(1L, anchor_rect.right - anchor_rect.left));
-    const double scale_y = static_cast<double>(height) / static_cast<double>(std::max(1L, anchor_rect.bottom - anchor_rect.top));
-
-    // Target position of the popup in anchor pixel space.
-    int dst_x = static_cast<int>(std::llround((static_cast<double>(item.rect.left) - anchor_rect.left) * scale_x));
-    int dst_y = static_cast<int>(std::llround((static_cast<double>(item.rect.top) - anchor_rect.top) * scale_y));
-
-    // Clip negative offsets so source rows/columns stay in bounds.
-    int src_x = 0;
-    int src_y = 0;
-    if (dst_x < 0) {
-      src_x = -dst_x;
-      dst_x = 0;
-    }
-    if (dst_y < 0) {
-      src_y = -dst_y;
-      dst_y = 0;
-    }
-
-    const int src_w = static_cast<int>(staging_desc.Width);
-    const int src_h = static_cast<int>(staging_desc.Height);
-    const int cols = std::min(src_w - src_x, width - dst_x);
-    const int rows = std::min(src_h - src_y, height - dst_y);
-
-    if (img->pixel_pitch != 4) {
-      // Non-BGRA frames are copied verbatim; alpha blending only applies to
-      // 32-bit ARGB content.
-      for (int y = 0; y < rows; ++y) {
-        const auto *src_row = static_cast<const std::uint8_t *>(mapped.pData) +
-          static_cast<std::size_t>(y + src_y) * mapped.RowPitch +
-          static_cast<std::size_t>(src_x) * img->pixel_pitch;
-        auto *dst_row = img->data +
-          static_cast<std::size_t>(dst_y + y) * img->row_pitch +
-          static_cast<std::size_t>(dst_x) * img->pixel_pitch;
-        std::copy_n(src_row, static_cast<std::size_t>(cols) * img->pixel_pitch, dst_row);
+      texture2d_t popup_src;
+      uint64_t popup_qpc;
+      item->wgc.set_cursor_visible(cursor_visible);
+      const auto popup_timeout = item->has_frame ? std::chrono::milliseconds(8) : std::min(timeout, std::chrono::milliseconds(100));
+      auto popup_status = item->wgc.next_frame(popup_timeout, &popup_src, popup_qpc);
+      if (popup_status == capture_e::ok) {
+        D3D11_TEXTURE2D_DESC popup_desc;
+        popup_src->GetDesc(&popup_desc);
+        if (update_window_cache(*item, popup_src.get(), popup_desc) == 0) {
+          item->has_frame = true;
+        }
+        item->wgc.release_frame();
       }
-      return 0;
+    }
+    return 0;
+  }
+
+  int window_capture_set_t::composite_gpu(ID3D11RenderTargetView *rt, int anchor_width, int anchor_height, vs_t &vs, ps_t &ps, blend_t &blend, sampler_state_t &sampler) {
+    display_->device_ctx->OMSetRenderTargets(1, &rt, nullptr);
+    display_->device_ctx->VSSetShader(vs.get(), nullptr, 0);
+    display_->device_ctx->PSSetShader(ps.get(), nullptr, 0);
+    display_->device_ctx->OMSetBlendState(blend.get(), nullptr, 0xFFFFFFFFu);
+    display_->device_ctx->PSSetSamplers(0, 1, &sampler);
+
+    for (auto &[window, item] : windows_) {
+      if (!item->has_frame || !item->srv) {
+        continue;
+      }
+      int x = 0;
+      int y = 0;
+      int w = 0;
+      int h = 0;
+      window_position(*item, anchor_width, anchor_height, x, y, w, h);
+      D3D11_VIEWPORT viewport {static_cast<FLOAT>(x), static_cast<FLOAT>(y), static_cast<FLOAT>(w), static_cast<FLOAT>(h), 0.0f, 1.0f};
+      display_->device_ctx->PSSetShaderResources(0, 1, &item->srv);
+      display_->device_ctx->RSSetViewports(1, &viewport);
+      display_->device_ctx->Draw(3, 0);
     }
 
-    // Alpha-composite the popup onto the anchor frame so transparent areas
-    // (rounded corners, drop shadows) blend instead of showing as black.
-    for (int y = 0; y < rows; ++y) {
-      const auto *src_row = static_cast<const std::uint8_t *>(mapped.pData) +
-        static_cast<std::size_t>(y + src_y) * mapped.RowPitch +
-        static_cast<std::size_t>(src_x) * 4u;
-      auto *dst_row = img->data +
-        static_cast<std::size_t>(dst_y + y) * img->row_pitch +
-        static_cast<std::size_t>(dst_x) * 4u;
-      for (int x = 0; x < cols; ++x) {
-        const auto *s = src_row + static_cast<std::size_t>(x) * 4u;
-        auto *d = dst_row + static_cast<std::size_t>(x) * 4u;
-        const std::uint32_t alpha = s[3];
-        if (alpha == 0xFF) {
-          d[0] = s[0];
-          d[1] = s[1];
-          d[2] = s[2];
-          d[3] = s[3];
-        } else if (alpha != 0) {
-          const std::uint32_t inv = 0xFF - alpha;
-          d[0] = static_cast<std::uint8_t>((static_cast<std::uint32_t>(s[0]) * alpha + static_cast<std::uint32_t>(d[0]) * inv) / 0xFF);
-          d[1] = static_cast<std::uint8_t>((static_cast<std::uint32_t>(s[1]) * alpha + static_cast<std::uint32_t>(d[1]) * inv) / 0xFF);
-          d[2] = static_cast<std::uint8_t>((static_cast<std::uint32_t>(s[2]) * alpha + static_cast<std::uint32_t>(d[2]) * inv) / 0xFF);
-          d[3] = static_cast<std::uint8_t>((static_cast<std::uint32_t>(s[3]) * alpha + static_cast<std::uint32_t>(d[3]) * inv) / 0xFF);
+    ID3D11ShaderResourceView *empty_srv = nullptr;
+    display_->device_ctx->PSSetShaderResources(0, 1, &empty_srv);
+    return 0;
+  }
+
+  int window_capture_set_t::composite_cpu(std::uint8_t *frame, std::size_t row_pitch, std::size_t pixel_pitch, int anchor_width, int anchor_height) {
+    if (!frame || pixel_pitch == 0 || row_pitch == 0) {
+      return -1;
+    }
+
+    for (auto &[window, item] : windows_) {
+      if (!item->has_frame || !item->staging) {
+        continue;
+      }
+      D3D11_TEXTURE2D_DESC staging_desc;
+      item->staging->GetDesc(&staging_desc);
+
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      if (FAILED(display_->device_ctx->Map(item->staging.get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+        BOOST_LOG(error) << "Window capture: failed to map popup staging texture"sv;
+        continue;
+      }
+      auto unmap = util::fail_guard([&]() {
+        display_->device_ctx->Unmap(item->staging.get(), 0);
+      });
+
+      int dst_x = 0;
+      int dst_y = 0;
+      int dst_w = 0;
+      int dst_h = 0;
+      window_position(*item, anchor_width, anchor_height, dst_x, dst_y, dst_w, dst_h);
+
+      // Clip negative offsets so source rows/columns stay in bounds.
+      int src_x = 0;
+      int src_y = 0;
+      if (dst_x < 0) {
+        src_x = -dst_x;
+        dst_x = 0;
+      }
+      if (dst_y < 0) {
+        src_y = -dst_y;
+        dst_y = 0;
+      }
+
+      const int src_w = static_cast<int>(staging_desc.Width);
+      const int src_h = static_cast<int>(staging_desc.Height);
+      const int cols = std::min(src_w - src_x, anchor_width - dst_x);
+      const int rows = std::min(src_h - src_y, anchor_height - dst_y);
+      if (cols <= 0 || rows <= 0) {
+        continue;
+      }
+
+      if (pixel_pitch != 4) {
+        // Non-BGRA frames are copied verbatim.
+        for (int yy = 0; yy < rows; ++yy) {
+          const auto *srow = static_cast<const std::uint8_t *>(mapped.pData) +
+            static_cast<std::size_t>(yy + src_y) * mapped.RowPitch +
+            static_cast<std::size_t>(src_x) * pixel_pitch;
+          auto *drow = frame +
+            static_cast<std::size_t>(dst_y + yy) * row_pitch +
+            static_cast<std::size_t>(dst_x) * pixel_pitch;
+          std::copy_n(srow, static_cast<std::size_t>(cols) * pixel_pitch, drow);
+        }
+        continue;
+      }
+
+      // Alpha-composite the popup onto the anchor frame so transparent areas
+      // (rounded corners, drop shadows) blend instead of showing as black.
+      for (int yy = 0; yy < rows; ++yy) {
+        const auto *srow = static_cast<const std::uint8_t *>(mapped.pData) +
+          static_cast<std::size_t>(yy + src_y) * mapped.RowPitch +
+          static_cast<std::size_t>(src_x) * 4u;
+        auto *drow = frame +
+          static_cast<std::size_t>(dst_y + yy) * row_pitch +
+          static_cast<std::size_t>(dst_x) * 4u;
+        for (int xx = 0; xx < cols; ++xx) {
+          const auto *s = srow + static_cast<std::size_t>(xx) * 4u;
+          auto *d = drow + static_cast<std::size_t>(xx) * 4u;
+          const std::uint32_t alpha = s[3];
+          if (alpha == 0xFF) {
+            d[0] = s[0];
+            d[1] = s[1];
+            d[2] = s[2];
+            d[3] = s[3];
+          } else if (alpha != 0) {
+            const std::uint32_t inv = 0xFF - alpha;
+            d[0] = static_cast<std::uint8_t>((static_cast<std::uint32_t>(s[0]) * alpha + static_cast<std::uint32_t>(d[0]) * inv) / 0xFF);
+            d[1] = static_cast<std::uint8_t>((static_cast<std::uint32_t>(s[1]) * alpha + static_cast<std::uint32_t>(d[1]) * inv) / 0xFF);
+            d[2] = static_cast<std::uint8_t>((static_cast<std::uint32_t>(s[2]) * alpha + static_cast<std::uint32_t>(d[2]) * inv) / 0xFF);
+            d[3] = static_cast<std::uint8_t>((static_cast<std::uint32_t>(s[3]) * alpha + static_cast<std::uint32_t>(d[3]) * inv) / 0xFF);
+          }
         }
       }
     }
@@ -786,15 +902,10 @@ namespace platf::dxgi {
     }
 
     this->hwnd = hwnd;
-    this->aux_exclude = aux_exclude;
-    this->capture_config = config;
-    DWORD process_id = 0;
-    GetWindowThreadProcessId(hwnd, &process_id);
-    pid = process_id;
+    window_set = std::make_unique<window_capture_set_t>(this, config, hwnd, aux_exclude);
+    window_set->refresh();
 
-    refresh_windows();
-
-    BOOST_LOG(info) << "Window capture initialized: ["sv << width << 'x' << height << "] hwnd=0x"sv << util::hex((std::uintptr_t) hwnd).to_string_view() << " pid="sv << pid;
+    BOOST_LOG(info) << "Window capture initialized: ["sv << width << 'x' << height << "] hwnd=0x"sv << util::hex((std::uintptr_t) hwnd).to_string_view();
     texture.reset();
     return 0;
   }
@@ -808,7 +919,7 @@ namespace platf::dxgi {
       BOOST_LOG(warning) << "Window capture: captured window was closed, stopping stream"sv;
       return capture_e::error;
     }
-    if (refresh_windows()) {
+    if (window_set->refresh()) {
       BOOST_LOG(warning) << "Window capture: anchor window was closed, stopping stream"sv;
       return capture_e::error;
     }
@@ -878,30 +989,10 @@ namespace platf::dxgi {
 
     std::copy_n((std::uint8_t *) img_info.pData, height * img_info.RowPitch, (std::uint8_t *) img->data);
 
-    // Composite each captured process window onto the anchor frame. The first
-    // frame of a window gets a longer timeout (the capture session needs a
-    // moment to start producing); once cached, a short timeout keeps static
-    // popups from stalling the frame.
-    for (auto &[window, item] : windows) {
-      GetWindowRect(window, &item->rect);
-
-      texture2d_t popup_src;
-      uint64_t popup_qpc;
-      item->wgc.set_cursor_visible(cursor_visible);
-      const auto popup_timeout = item->has_frame ? std::chrono::milliseconds(8) : std::min(timeout, std::chrono::milliseconds(100));
-      auto popup_status = item->wgc.next_frame(popup_timeout, &popup_src, popup_qpc);
-      if (popup_status == capture_e::ok) {
-        D3D11_TEXTURE2D_DESC popup_desc;
-        popup_src->GetDesc(&popup_desc);
-        if (update_window_staging(*item, popup_src.get(), popup_desc) == 0) {
-          item->has_frame = true;
-        }
-        item->wgc.release_frame();
-      }
-
-      if (item->has_frame) {
-        blit_window(img, *item);
-      }
+    // Composite each captured process window onto the anchor frame.
+    if (!window_set->empty()) {
+      window_set->capture_popups(cursor_visible, timeout);
+      window_set->composite_cpu(img->data, img->row_pitch, img->pixel_pitch, width, height);
     }
 
     device_ctx->Unmap(texture.get(), 0);

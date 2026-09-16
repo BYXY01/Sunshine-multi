@@ -1045,7 +1045,7 @@ namespace platf {
       // encoders use the RAM backend (no GPU->CPU staging for hardware).
       if (hwdevice_type == mem_type_e::dxgi) {
         auto disp = std::make_shared<dxgi::display_window_vram_t>();
-        if (!disp->init(config, display_name, (HWND) target_hwnd)) {
+        if (!disp->init(config, display_name, (HWND) target_hwnd, selected_group->aux_exclude)) {
           return disp;
         }
       } else {

@@ -109,9 +109,13 @@ window frame at their screen-relative offsets with alpha blending, so the
 full application appears in the stream. Windows whose class is listed in
 `aux_exclude` are filtered out.
 
-Hardware encoders use the GPU-backed window backend (frames stay in video
-memory); software encoders use the RAM backend (frames are composited on
-the CPU).
+Hardware encoders use the GPU-backed window backend; software encoders use
+the RAM backend. The RAM backend composites popups on the CPU. The GPU
+backend composites them on the GPU by default: the anchor frame is copied
+into the capture texture and each popup is drawn over it at its
+screen-relative offset with alpha blending, so no CPU round trip is needed.
+If GPU composition fails, the backend falls back to compositing the popups
+on the CPU and uploading the result.
 
 ## Command line
 

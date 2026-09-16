@@ -150,38 +150,6 @@ namespace platf::dxgi {
   blob_t cursor_vs_hlsl;  ///< Cursor vs hlsl.
 
   /**
-   * @brief D3D-backed captured image and duplication metadata.
-   */
-  struct img_d3d_t: public platf::img_t {
-    // These objects are owned by the display_t's ID3D11Device
-    texture2d_t capture_texture;  ///< Capture texture.
-    render_target_t capture_rt;  ///< Capture rt.
-    keyed_mutex_t capture_mutex;  ///< Capture mutex.
-
-    // This is the shared handle used by hwdevice_t to open capture_texture
-    HANDLE encoder_texture_handle = {};  ///< Encoder texture handle.
-
-    // Set to true if the image corresponds to a dummy texture used prior to
-    // the first successful capture of a desktop frame
-    bool dummy = false;  ///< Whether this image is a dummy placeholder.
-
-    // Set to true if the image is blank (contains no content at all, including a cursor)
-    bool blank = true;  ///< Whether the texture currently contains a blank frame.
-
-    // Unique identifier for this image
-    uint32_t id = 0;  ///< Unique identifier used to cache encoder resources for this image.
-
-    // DXGI format of this image texture
-    DXGI_FORMAT format;  ///< DXGI format of the captured texture.
-
-    virtual ~img_d3d_t() override {
-      if (encoder_texture_handle) {
-        CloseHandle(encoder_texture_handle);
-      }
-    };
-  };
-
-  /**
    * @brief Keyed-mutex guard used while sharing a D3D texture.
    */
   struct texture_lock_helper {
@@ -1908,7 +1876,7 @@ namespace platf::dxgi {
     return 0;
   }
 
-  int display_window_vram_t::init(const ::video::config_t &config, const std::string &display_name, HWND hwnd) {
+  int display_window_vram_t::init(const ::video::config_t &config, const std::string &display_name, HWND hwnd, const std::vector<std::string> &aux_exclude) {
     if (init_window_device(this, config)) {
       return -1;
     }
@@ -1917,7 +1885,52 @@ namespace platf::dxgi {
       return -1;
     }
 
+    // Create the GPU composition resources. The vertex/pixel shaders are the
+    // shared window-quad shaders compiled during global display init: they
+    // sample a bound texture over a viewport-sized quad.
+    HRESULT status = device->CreateVertexShader(cursor_vs_hlsl->GetBufferPointer(), cursor_vs_hlsl->GetBufferSize(), nullptr, &window_vs);
+    if (FAILED(status)) {
+      BOOST_LOG(error) << "Window capture: failed to create window vertex shader [0x"sv << util::hex(status).to_string_view() << ']';
+      return -1;
+    }
+    status = device->CreatePixelShader(cursor_ps_hlsl->GetBufferPointer(), cursor_ps_hlsl->GetBufferSize(), nullptr, &window_ps);
+    if (FAILED(status)) {
+      BOOST_LOG(error) << "Window capture: failed to create window pixel shader [0x"sv << util::hex(status).to_string_view() << ']';
+      return -1;
+    }
+    blend_alpha = make_blend(device.get(), true, false);
+    if (!blend_alpha) {
+      BOOST_LOG(error) << "Window capture: failed to create window blend state"sv;
+      return -1;
+    }
+    D3D11_SAMPLER_DESC sampler_desc {};
+    sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+    sampler_desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    sampler_desc.MinLOD = 0;
+    sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
+    status = device->CreateSamplerState(&sampler_desc, &sampler_linear);
+    if (FAILED(status)) {
+      BOOST_LOG(error) << "Window capture: failed to create window sampler [0x"sv << util::hex(status).to_string_view() << ']';
+      return -1;
+    }
+
+    // The window vertex shader reads a zero rotation step from register b2.
+    int32_t rotation_data[16 / sizeof(int32_t)] {0};
+    window_rotation = make_buffer(device.get(), rotation_data);
+    if (!window_rotation) {
+      BOOST_LOG(error) << "Window capture: failed to create window rotation constant buffer"sv;
+      return -1;
+    }
+    device_ctx->VSSetConstantBuffers(2, 1, &window_rotation);
+    device_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    device_ctx->PSSetSamplers(0, 1, &sampler_linear);
+
     this->hwnd = hwnd;
+    window_set = std::make_unique<window_capture_set_t>(this, config, hwnd, aux_exclude);
+    window_set->refresh();
 
     // Window capture has no rotation, so the pre-rotation dimensions match
     // the capture dimensions used by the VRAM image pool.
@@ -1928,10 +1941,73 @@ namespace platf::dxgi {
     return 0;
   }
 
+  int display_window_vram_t::composite_gpu(img_d3d_t *d3d_img, ID3D11Texture2D *src) {
+    // The anchor frame becomes the background of the capture texture.
+    device_ctx->CopyResource(d3d_img->capture_texture.get(), src);
+    return window_set->composite_gpu(d3d_img->capture_rt.get(), width_before_rotation, height_before_rotation, window_vs, window_ps, blend_alpha, sampler_linear);
+  }
+
+  int display_window_vram_t::composite_cpu_fallback(img_d3d_t *d3d_img, ID3D11Texture2D *src, const D3D11_TEXTURE2D_DESC &src_desc) {
+    if (!anchor_staging) {
+      D3D11_TEXTURE2D_DESC t {};
+      t.Width = src_desc.Width;
+      t.Height = src_desc.Height;
+      t.MipLevels = 1;
+      t.ArraySize = 1;
+      t.SampleDesc.Count = 1;
+      t.Usage = D3D11_USAGE_STAGING;
+      t.Format = src_desc.Format;
+      t.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      auto status = device->CreateTexture2D(&t, nullptr, &anchor_staging);
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Window capture: failed to create anchor staging texture [0x"sv << util::hex(status).to_string_view() << ']';
+        return -1;
+      }
+    }
+    D3D11_TEXTURE2D_DESC staging_desc;
+    anchor_staging->GetDesc(&staging_desc);
+    if (staging_desc.Width != src_desc.Width || staging_desc.Height != src_desc.Height || staging_desc.Format != src_desc.Format) {
+      anchor_staging.reset();
+      return -1;
+    }
+
+    device_ctx->CopyResource(anchor_staging.get(), src);
+
+    D3D11_MAPPED_SUBRESOURCE mapped {};
+    if (FAILED(device_ctx->Map(anchor_staging.get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+      BOOST_LOG(error) << "Window capture: failed to map anchor staging texture"sv;
+      return -1;
+    }
+    auto unmap = util::fail_guard([&]() {
+      device_ctx->Unmap(anchor_staging.get(), 0);
+    });
+
+    const std::size_t pixel_pitch = static_cast<std::size_t>(get_pixel_pitch());
+    const std::size_t row_pitch = static_cast<std::size_t>(width_before_rotation) * pixel_pitch;
+    cpu_frame.resize(static_cast<std::size_t>(height_before_rotation) * row_pitch);
+
+    for (int y = 0; y < height_before_rotation; ++y) {
+      std::copy_n(
+        static_cast<const std::uint8_t *>(mapped.pData) + static_cast<std::size_t>(y) * mapped.RowPitch,
+        row_pitch,
+        cpu_frame.data() + static_cast<std::size_t>(y) * row_pitch);
+    }
+
+    window_set->composite_cpu(cpu_frame.data(), row_pitch, pixel_pitch, width_before_rotation, height_before_rotation);
+
+    // Upload the composite back into the capture texture for the encoder.
+    device_ctx->UpdateSubresource(d3d_img->capture_texture.get(), 0, nullptr, cpu_frame.data(), static_cast<UINT>(row_pitch), 0);
+    return 0;
+  }
+
   capture_e display_window_vram_t::snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) {
     // If the captured window has been destroyed, stop the session.
     if (!IsWindow(hwnd)) {
       BOOST_LOG(warning) << "Window capture: captured window was closed, stopping stream"sv;
+      return capture_e::error;
+    }
+    if (window_set->refresh()) {
+      BOOST_LOG(warning) << "Window capture: anchor window was closed, stopping stream"sv;
       return capture_e::error;
     }
 
@@ -1966,7 +2042,19 @@ namespace platf::dxgi {
     if (complete_img(d3d_img.get(), false) == 0) {
       texture_lock_helper lock_helper(d3d_img->capture_mutex.get());
       if (lock_helper.lock()) {
-        device_ctx->CopyResource(d3d_img->capture_texture.get(), src.get());
+        if (window_set->empty()) {
+          // No popups: the anchor frame is passed straight to the encoder.
+          device_ctx->CopyResource(d3d_img->capture_texture.get(), src.get());
+        } else {
+          window_set->capture_popups(cursor_visible, timeout);
+          // Prefer GPU composition; fall back to CPU composition on failure.
+          if (composite_gpu(d3d_img.get(), src.get()) != 0) {
+            if (composite_cpu_fallback(d3d_img.get(), src.get(), desc) != 0) {
+              BOOST_LOG(warning) << "Window capture: popup composition failed, streaming anchor frame only"sv;
+              device_ctx->CopyResource(d3d_img->capture_texture.get(), src.get());
+            }
+          }
+        }
       } else {
         BOOST_LOG(error) << "Window capture: failed to lock capture texture"sv;
         return capture_e::error;

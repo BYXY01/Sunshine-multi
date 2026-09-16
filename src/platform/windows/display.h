@@ -540,6 +540,38 @@ namespace platf::dxgi {
   };
 
   /**
+   * @brief D3D-backed captured image and duplication metadata.
+   */
+  struct img_d3d_t: public platf::img_t {
+    // These objects are owned by the display_t's ID3D11Device
+    texture2d_t capture_texture;  ///< Capture texture.
+    render_target_t capture_rt;  ///< Capture rt.
+    keyed_mutex_t capture_mutex;  ///< Capture mutex.
+
+    // This is the shared handle used by hwdevice_t to open capture_texture
+    HANDLE encoder_texture_handle = {};  ///< Encoder texture handle.
+
+    // Set to true if the image corresponds to a dummy texture used prior to
+    // the first successful capture of a desktop frame
+    bool dummy = false;  ///< Whether this image is a dummy placeholder.
+
+    // Set to true if the image is blank (contains no content at all, including a cursor)
+    bool blank = true;  ///< Whether the texture currently contains a blank frame.
+
+    // Unique identifier for this image
+    uint32_t id = 0;  ///< Unique identifier used to cache encoder resources for this image.
+
+    // DXGI format of this image texture
+    DXGI_FORMAT format;  ///< DXGI format of the captured texture.
+
+    virtual ~img_d3d_t() override {
+      if (encoder_texture_handle) {
+        CloseHandle(encoder_texture_handle);
+      }
+    };
+  };
+
+  /**
    * Display component for devices that use hardware encoders.
    */
   class display_vram_t: public display_base_t, public std::enable_shared_from_this<display_vram_t> {
@@ -866,7 +898,155 @@ namespace platf::dxgi {
     wgc_capture_t wgc;  ///< WGC capture session for this window.
     RECT rect {};  ///< Screen rectangle in logical pixels.
     texture2d_t staging;  ///< Cached CPU-readable copy of the latest window frame.
+    texture2d_t texture;  ///< Cached GPU copy of the latest window frame (for GPU composition).
+    shader_res_t srv;  ///< Shader-resource view over the GPU cache.
     bool has_frame {false};  ///< Whether a frame has been captured and cached.
+  };
+
+  /**
+   * @brief Shared process-window composition set for window capture backends.
+   *
+   * Binds the process owning an anchor window and manages the set of its
+   * visible top-level windows, each captured with its own WGC item. Frames
+   * are cached both as a GPU texture (for GPU composition) and as a staging
+   * texture (for CPU fallback). The RAM and VRAM window backends both use
+   * this set; the backend supplies the anchor frame and the composition
+   * output.
+   */
+  class window_capture_set_t {
+  public:
+    /**
+     * @brief Bind to the process owning the anchor window.
+     *
+     * @param display Window display backend supplying the D3D device.
+     * @param config Capture configuration used to create WGC items.
+     * @param anchor Anchor window matched by the group rules.
+     * @param aux_exclude Window classes excluded from the frame.
+     */
+    window_capture_set_t(display_base_t *display, const ::video::config_t &config, HWND anchor, const std::vector<std::string> &aux_exclude);
+
+    /**
+     * @brief Re-enumerate the process windows and refresh the set.
+     *
+     * @return 0 on success; nonzero when the anchor window is gone.
+     */
+    int refresh();
+
+    /**
+     * @brief Get the number of auxiliary windows in the set.
+     *
+     * @return Count of auxiliary (non-anchor) windows.
+     */
+    std::size_t size() const;
+    /**
+     * @brief Check whether the set holds any auxiliary windows.
+     *
+     * @return True when there are no auxiliary windows.
+     */
+    bool empty() const;
+    /**
+     * @brief Get the anchor window handle.
+     *
+     * @return Anchor HWND.
+     */
+    HWND anchor() const;
+
+    /**
+     * @brief Capture fresh frames for every auxiliary window.
+     *
+     * Each window's WGC item is polled with a short timeout; the first frame
+     * of a window waits longer so the capture session can start producing.
+     * New frames update both the GPU and staging caches.
+     *
+     * @param cursor_visible Cursor visibility applied to the capture sessions.
+     * @param timeout Anchor frame timeout used to bound the first-frame wait.
+     * @return 0 when at least one window is ready; nonzero otherwise.
+     */
+    int capture_popups(bool cursor_visible, std::chrono::milliseconds timeout);
+
+    /**
+     * @brief Composite the auxiliary windows onto a GPU render target.
+     *
+     * Draws each auxiliary window's cached texture at its screen-relative
+     * position, alpha-blended. The anchor frame must already be copied into
+     * the render target before calling this.
+     *
+     * @param rt Render target receiving the composite.
+     * @param anchor_width Width of the anchor frame in pixels.
+     * @param anchor_height Height of the anchor frame in pixels.
+     * @param vs Vertex shader used to draw the window quad.
+     * @param ps Pixel shader used to sample the window texture.
+     * @param blend Alpha-blend state applied while drawing.
+     * @param sampler Sampler used by the pixel shader.
+     * @return 0 on success; nonzero when composition failed.
+     */
+    int composite_gpu(ID3D11RenderTargetView *rt, int anchor_width, int anchor_height, vs_t &vs, ps_t &ps, blend_t &blend, sampler_state_t &sampler);
+
+    /**
+     * @brief Composite the auxiliary windows onto a CPU frame buffer.
+     *
+     * Fallback used when GPU composition is unavailable: each window's
+     * staging texture is read back and alpha-blended at its screen-relative
+     * offset.
+     *
+     * @param frame CPU frame buffer (anchor pixels already present).
+     * @param row_pitch Bytes per frame row.
+     * @param pixel_pitch Bytes per pixel.
+     * @param anchor_width Width of the anchor frame in pixels.
+     * @param anchor_height Height of the anchor frame in pixels.
+     * @return 0 on success; nonzero when composition failed.
+     */
+    int composite_cpu(std::uint8_t *frame, std::size_t row_pitch, std::size_t pixel_pitch, int anchor_width, int anchor_height);
+
+  private:
+    /**
+     * @brief Check whether a top-level window should be captured.
+     *
+     * @param candidate Window handle to evaluate.
+     * @return True when the window should be added to the set.
+     */
+    bool should_capture(HWND candidate) const;
+    /**
+     * @brief Add a new window of the process to the set.
+     *
+     * @param candidate Window handle to attach.
+     * @return 0 on success; nonzero when the window cannot be captured.
+     */
+    int attach_window(HWND candidate);
+    /**
+     * @brief Remove a window from the set.
+     *
+     * @param candidate Window handle to detach.
+     */
+    void detach_window(HWND candidate);
+    /**
+     * @brief Update the cached copies of a window's latest frame.
+     *
+     * @param item Window whose caches are updated.
+     * @param src Fresh WGC frame texture.
+     * @param src_desc Texture descriptor of the frame.
+     * @return 0 on success; nonzero on failure.
+     */
+    int update_window_cache(window_item_t &item, ID3D11Texture2D *src, const D3D11_TEXTURE2D_DESC &src_desc);
+    /**
+     * @brief Compute the target rectangle of a window in anchor pixel space.
+     *
+     * @param item Window to position.
+     * @param anchor_width Anchor frame width.
+     * @param anchor_height Anchor frame height.
+     * @param out_x Output left offset.
+     * @param out_y Output top offset.
+     * @param out_w Output width.
+     * @param out_h Output height.
+     */
+    void window_position(const window_item_t &item, int anchor_width, int anchor_height, int &out_x, int &out_y, int &out_w, int &out_h) const;
+
+    display_base_t *display_;  ///< Display backend supplying the D3D device.
+    HWND anchor_;  ///< Anchor window handle.
+    std::uint32_t pid_ {0};  ///< Process bound by the anchor window.
+    std::vector<std::string> aux_exclude_;  ///< Window classes excluded from the frame.
+    ::video::config_t config_;  ///< Capture configuration for WGC item creation.
+    std::map<HWND, std::unique_ptr<window_item_t>> windows_;  ///< Auxiliary windows keyed by handle.
   };
 
   /**
@@ -877,76 +1057,15 @@ namespace platf::dxgi {
    * monitor-based backends, no DXGI output enumeration is required.
    *
    * Regardless of which rule (process / title / class / hwnd) matched, the
-   * backend binds to the process owning the anchor window and enumerates all
-   * visible top-level windows of that process every frame. Popups (menus,
-   * dialogs, tooltips) are composited onto the anchor window frame at their
-   * screen-relative offsets; windows whose class appears in `aux_exclude`
-   * are filtered out.
+   * backend binds to the process owning the anchor window and composites all
+   * its visible top-level windows (menus, dialogs, tooltips) into the anchor
+   * frame on the CPU; windows whose class appears in `aux_exclude` are
+   * filtered out.
    */
   class display_window_t: public display_ram_t {
     wgc_capture_t wgc;  ///< WGC capture session for the anchor window.
     HWND hwnd {nullptr};  ///< Anchor window handle (matched by the group rules).
-    std::uint32_t pid {0};  ///< Process bound by the anchor window.
-    std::vector<std::string> aux_exclude;  ///< Window classes excluded from the frame.
-    ::video::config_t capture_config;  ///< Capture configuration retained for window-item creation.
-    std::map<HWND, std::unique_ptr<window_item_t>> windows;  ///< Captured windows of the process keyed by handle.
-
-    /**
-     * @brief Check whether a top-level window should be captured.
-     *
-     * A window is captured when it belongs to the bound process, is visible,
-     * is not the anchor window, and its class is not listed in `aux_exclude`.
-     *
-     * @param candidate Window handle to evaluate.
-     * @return True when the window should be added to the composition set.
-     */
-    bool should_capture(HWND candidate) const;
-    /**
-     * @brief Add a new window of the process to the composition set.
-     *
-     * @param candidate Window handle to attach.
-     * @return 0 on success; nonzero when the window cannot be captured.
-     */
-    int attach_window(HWND candidate);
-    /**
-     * @brief Remove a window from the composition set.
-     *
-     * @param candidate Window handle to detach.
-     */
-    void detach_window(HWND candidate);
-    /**
-     * @brief Re-enumerate the process windows and refresh the composition set.
-     *
-     * New visible windows are captured; windows that disappeared are removed.
-     *
-     * @return 0 on success; nonzero when the anchor window is gone.
-     */
-    int refresh_windows();
-    /**
-     * @brief Copy a window frame into the item's cached staging texture.
-     *
-     * The staging texture is (re)created to match the frame and receives a
-     * GPU copy of the window content, so a static popup can be re-composited
-     * on later frames without waiting for a new WGC frame.
-     *
-     * @param item Window whose cache is updated.
-     * @param src Window texture to copy from.
-     * @param src_desc Texture descriptor of the window frame.
-     * @return 0 on success; nonzero on failure.
-     */
-    int update_window_staging(window_item_t &item, ID3D11Texture2D *src, const D3D11_TEXTURE2D_DESC &src_desc);
-    /**
-     * @brief Composite a captured window's cached frame onto the anchor frame.
-     *
-     * The window's cached pixels are blitted onto the anchor image at the
-     * offset between the two windows' screen rectangles, clipped to the
-     * anchor bounds.
-     *
-     * @param img Anchor image buffer.
-     * @param item Window whose cached frame is composited.
-     * @return 0 on success; nonzero on failure.
-     */
-    int blit_window(img_t *img, window_item_t &item);
+    std::unique_ptr<window_capture_set_t> window_set;  ///< Process-window composition set.
 
   public:
     /**
@@ -1011,10 +1130,50 @@ namespace platf::dxgi {
    * Same as `display_window_t` but keeps frames on the GPU: the WGC capture
    * texture is copied into a shared D3D11 texture that NVENC consumes
    * directly, avoiding the GPU->CPU round trip used by the RAM backend.
+   *
+   * Popup composition happens on the GPU by default: auxiliary windows are
+   * drawn onto the shared capture texture at their screen-relative offsets
+   * with alpha blending. When GPU composition is unavailable, the backend
+   * falls back to compositing the auxiliary windows on the CPU and uploading
+   * the result.
    */
   class display_window_vram_t: public display_vram_t {
-    wgc_capture_t wgc;  ///< WGC window capture session.
-    HWND hwnd {nullptr};  ///< Window handle being captured; null after the window closes.
+    wgc_capture_t wgc;  ///< WGC capture session for the anchor window.
+    HWND hwnd {nullptr};  ///< Anchor window handle being captured; null after the window closes.
+    std::unique_ptr<window_capture_set_t> window_set;  ///< Process-window composition set.
+    texture2d_t anchor_staging;  ///< Staging texture used to read back the anchor frame for the CPU fallback.
+    std::vector<std::uint8_t> cpu_frame;  ///< CPU frame buffer used by the CPU fallback composite.
+    vs_t window_vs;  ///< Vertex shader used to draw window quads.
+    ps_t window_ps;  ///< Pixel shader used to sample window textures.
+    blend_t blend_alpha;  ///< Alpha-blend state for window composition.
+    sampler_state_t sampler_linear;  ///< Linear sampler used when drawing window textures.
+    buf_t window_rotation;  ///< Zero rotation constant buffer required by the window vertex shader.
+
+    /**
+     * @brief Composite auxiliary windows on the GPU onto the capture texture.
+     *
+     * The anchor frame is copied into the capture texture first, then each
+     * auxiliary window is drawn at its screen-relative offset with alpha
+     * blending. Falls back to `composite_cpu_fallback` on failure.
+     *
+     * @param d3d_img Capture texture receiving the composite.
+     * @param src Anchor window frame texture.
+     * @return 0 on success; nonzero when GPU composition failed.
+     */
+    int composite_gpu(img_d3d_t *d3d_img, ID3D11Texture2D *src);
+    /**
+     * @brief Composite auxiliary windows on the CPU and upload the result.
+     *
+     * Fallback used when GPU composition is unavailable: the anchor frame is
+     * read back to a CPU buffer, auxiliary windows are alpha-blended onto it,
+     * and the result is uploaded into the capture texture.
+     *
+     * @param d3d_img Capture texture receiving the composite.
+     * @param src Anchor window frame texture.
+     * @param src_desc Descriptor of the anchor frame.
+     * @return 0 on success; nonzero on failure.
+     */
+    int composite_cpu_fallback(img_d3d_t *d3d_img, ID3D11Texture2D *src, const D3D11_TEXTURE2D_DESC &src_desc);
 
   public:
     /**
@@ -1022,10 +1181,11 @@ namespace platf::dxgi {
      *
      * @param config Configuration values to apply.
      * @param display_name Display name.
-     * @param hwnd Win32 window handle to capture.
+     * @param hwnd Anchor window handle matched by the group rules.
+     * @param aux_exclude Window classes excluded from the frame.
      * @return 0 on success; nonzero or negative platform status on failure.
      */
-    int init(const ::video::config_t &config, const std::string &display_name, HWND hwnd);
+    int init(const ::video::config_t &config, const std::string &display_name, HWND hwnd, const std::vector<std::string> &aux_exclude = {});
     /**
      * @brief Capture a window frame into the provided image object.
      *

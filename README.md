@@ -36,6 +36,7 @@ Feature additions (step by step):
 | 6.4-1 | **GPU window capture backend** — window frames stay in video memory and feed NVENC directly (no GPU→CPU round trip). Software encoders use the RAM backend. |
 | 6.4-2 | **Port modes** — `single-port` (all groups share RTSP port 47989, routed by group name) or `per-group-port` (one dedicated RTSP port per group, allocated from a `port_range`), plus a configurable default group. |
 | 6.4-3 | **Popup composition** — the backend binds to the process owning the matched window and composites all its visible top-level windows (menus, dialogs, tooltips) into one frame, so the full application appears in the stream. |
+| 6.4-4 | **GPU popup composition** — the GPU-backed (hardware) window backend composites popups on the GPU, drawing them onto the capture texture after the anchor frame (no CPU round trip); falls back to CPU composition if GPU composition fails. |
 
 Session groups are configured with a JSON file (`session-groups.json`) or
 command-line options (`--port-mode`, `--port-range`, `--default-group`,
