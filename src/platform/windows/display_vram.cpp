@@ -1887,46 +1887,54 @@ namespace platf::dxgi {
 
     // Create the GPU composition resources. The vertex/pixel shaders are the
     // shared window-quad shaders compiled during global display init: they
-    // sample a bound texture over a viewport-sized quad.
-    HRESULT status = device->CreateVertexShader(cursor_vs_hlsl->GetBufferPointer(), cursor_vs_hlsl->GetBufferSize(), nullptr, &window_vs);
-    if (FAILED(status)) {
-      BOOST_LOG(error) << "Window capture: failed to create window vertex shader [0x"sv << util::hex(status).to_string_view() << ']';
-      return -1;
-    }
-    status = device->CreatePixelShader(cursor_ps_hlsl->GetBufferPointer(), cursor_ps_hlsl->GetBufferSize(), nullptr, &window_ps);
-    if (FAILED(status)) {
-      BOOST_LOG(error) << "Window capture: failed to create window pixel shader [0x"sv << util::hex(status).to_string_view() << ']';
-      return -1;
-    }
-    blend_alpha = make_blend(device.get(), true, false);
-    if (!blend_alpha) {
-      BOOST_LOG(error) << "Window capture: failed to create window blend state"sv;
-      return -1;
-    }
-    D3D11_SAMPLER_DESC sampler_desc {};
-    sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-    sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
-    sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
-    sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
-    sampler_desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
-    sampler_desc.MinLOD = 0;
-    sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
-    status = device->CreateSamplerState(&sampler_desc, &sampler_linear);
-    if (FAILED(status)) {
-      BOOST_LOG(error) << "Window capture: failed to create window sampler [0x"sv << util::hex(status).to_string_view() << ']';
-      return -1;
-    }
+    // sample a bound texture over a viewport-sized quad. GPU composition is a
+    // capability: if any resource cannot be created, the backend keeps working
+    // and composites popups on the CPU instead.
+    gpu_composition_ready = false;
+    if (cursor_vs_hlsl && cursor_ps_hlsl) {
+      HRESULT status = device->CreateVertexShader(cursor_vs_hlsl->GetBufferPointer(), cursor_vs_hlsl->GetBufferSize(), nullptr, &window_vs);
+      if (FAILED(status)) {
+        BOOST_LOG(warning) << "Window capture: failed to create window vertex shader [0x"sv << util::hex(status).to_string_view() << "]; popups will be composited on the CPU"sv;
+        window_vs.reset();
+      } else {
+        status = device->CreatePixelShader(cursor_ps_hlsl->GetBufferPointer(), cursor_ps_hlsl->GetBufferSize(), nullptr, &window_ps);
+        if (FAILED(status)) {
+          BOOST_LOG(warning) << "Window capture: failed to create window pixel shader [0x"sv << util::hex(status).to_string_view() << "]; popups will be composited on the CPU"sv;
+          window_vs.reset();
+        } else {
+          blend_alpha = make_blend(device.get(), true, false);
+          D3D11_SAMPLER_DESC sampler_desc {};
+          sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+          sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+          sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+          sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+          sampler_desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+          sampler_desc.MinLOD = 0;
+          sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
+          HRESULT sampler_status = device->CreateSamplerState(&sampler_desc, &sampler_linear);
 
-    // The window vertex shader reads a zero rotation step from register b2.
-    int32_t rotation_data[16 / sizeof(int32_t)] {0};
-    window_rotation = make_buffer(device.get(), rotation_data);
-    if (!window_rotation) {
-      BOOST_LOG(error) << "Window capture: failed to create window rotation constant buffer"sv;
-      return -1;
+          // The window vertex shader reads a zero rotation step from register b2.
+          int32_t rotation_data[16 / sizeof(int32_t)] {0};
+          window_rotation = make_buffer(device.get(), rotation_data);
+
+          if (!blend_alpha || FAILED(sampler_status) || !window_rotation) {
+            BOOST_LOG(warning) << "Window capture: failed to create GPU composition state; popups will be composited on the CPU"sv;
+            window_vs.reset();
+            window_ps.reset();
+            blend_alpha.reset();
+            sampler_linear.reset();
+            window_rotation.reset();
+          } else {
+            gpu_composition_ready = true;
+            device_ctx->VSSetConstantBuffers(2, 1, &window_rotation);
+            device_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            device_ctx->PSSetSamplers(0, 1, &sampler_linear);
+          }
+        }
+      }
+    } else {
+      BOOST_LOG(warning) << "Window capture: shared window shaders are unavailable; popups will be composited on the CPU"sv;
     }
-    device_ctx->VSSetConstantBuffers(2, 1, &window_rotation);
-    device_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    device_ctx->PSSetSamplers(0, 1, &sampler_linear);
 
     this->hwnd = hwnd;
     window_set = std::make_unique<window_capture_set_t>(this, config, hwnd, aux_exclude);
@@ -1937,14 +1945,14 @@ namespace platf::dxgi {
     width_before_rotation = width;
     height_before_rotation = height;
 
-    BOOST_LOG(info) << "Window capture initialized (vram): ["sv << width << 'x' << height << "] hwnd=0x"sv << util::hex((std::uintptr_t) hwnd).to_string_view();
+    BOOST_LOG(info) << "Window capture initialized (vram): ["sv << width << 'x' << height << "] hwnd=0x"sv << util::hex((std::uintptr_t) hwnd).to_string_view() << (gpu_composition_ready ? " (gpu composition)"sv : " (cpu composition)"sv);
     return 0;
   }
 
-  int display_window_vram_t::composite_gpu(img_d3d_t *d3d_img, ID3D11Texture2D *src) {
+  void display_window_vram_t::composite_gpu(img_d3d_t *d3d_img, ID3D11Texture2D *src) {
     // The anchor frame becomes the background of the capture texture.
     device_ctx->CopyResource(d3d_img->capture_texture.get(), src);
-    return window_set->composite_gpu(d3d_img->capture_rt.get(), width_before_rotation, height_before_rotation, window_vs, window_ps, blend_alpha, sampler_linear);
+    window_set->composite_gpu(d3d_img->capture_rt.get(), width_before_rotation, height_before_rotation, window_vs, window_ps, blend_alpha, sampler_linear);
   }
 
   int display_window_vram_t::composite_cpu_fallback(img_d3d_t *d3d_img, ID3D11Texture2D *src, const D3D11_TEXTURE2D_DESC &src_desc) {
@@ -2047,12 +2055,13 @@ namespace platf::dxgi {
           device_ctx->CopyResource(d3d_img->capture_texture.get(), src.get());
         } else {
           window_set->capture_popups(cursor_visible, timeout);
-          // Prefer GPU composition; fall back to CPU composition on failure.
-          if (composite_gpu(d3d_img.get(), src.get()) != 0) {
-            if (composite_cpu_fallback(d3d_img.get(), src.get(), desc) != 0) {
-              BOOST_LOG(warning) << "Window capture: popup composition failed, streaming anchor frame only"sv;
-              device_ctx->CopyResource(d3d_img->capture_texture.get(), src.get());
-            }
+          // Composition method is decided once at init (capability): GPU when
+          // available, otherwise CPU; the anchor frame is the final fallback.
+          if (gpu_composition_ready) {
+            composite_gpu(d3d_img.get(), src.get());
+          } else if (composite_cpu_fallback(d3d_img.get(), src.get(), desc) != 0) {
+            BOOST_LOG(warning) << "Window capture: popup composition failed, streaming anchor frame only"sv;
+            device_ctx->CopyResource(d3d_img->capture_texture.get(), src.get());
           }
         }
       } else {

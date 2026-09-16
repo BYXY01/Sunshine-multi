@@ -60,7 +60,6 @@ overrides the file.
 | `name` | Unique group name. |
 | `capture` | `window` (window compositing backend) or `monitor` (stock monitor capture). |
 | `rules` | Window matching rules; a window joins the group when **any** rule matches (OR). |
-| `aux_include` | Reserved. Auxiliary window classes are included by default. |
 | `aux_exclude` | Window classes filtered from the composited frame (e.g. tooltips, IME). |
 | `max_fps` | Maximum capture framerate. |
 | `bitrate_kbps` | Stream bitrate in kbps; 0 lets the client decide. |

@@ -56,7 +56,6 @@ namespace session_group {
     std::uint16_t port {0};  ///< Moonlight TCP port used by this group.
     std::uintptr_t hwnd {0};  ///< Direct Win32 window handle to capture; overrides all rules when non-zero.
     std::vector<window_rule_t> rules;  ///< Window matching rules (OR).
-    std::vector<std::string> aux_include;  ///< Auxiliary window classes always composited (e.g. menus/dialogs).
     std::vector<std::string> aux_exclude;  ///< Auxiliary window classes filtered from the frame.
     int max_fps {60};  ///< Maximum capture framerate.
     int bitrate_kbps {0};  ///< Stream bitrate in kbps; 0 leaves the client to decide.

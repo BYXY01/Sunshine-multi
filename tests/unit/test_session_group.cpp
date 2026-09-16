@@ -42,7 +42,6 @@ namespace {
               {"box": "cap_u1_notepad"},
               {"process": "notepad.exe"}
             ],
-            "aux_include": ["#32768", "#32770"],
             "aux_exclude": ["tooltips_class32", "IME"],
             "max_fps": 60,
             "bitrate_kbps": 20000
@@ -76,9 +75,6 @@ TEST_F(SessionGroupTest, ParsesValidGroupConfiguration) {
   EXPECT_EQ(first.rules.size(), 2);
   EXPECT_EQ(first.rules[0].box, "cap_u1_notepad");
   EXPECT_EQ(first.rules[1].process, "notepad.exe");
-  ASSERT_EQ(first.aux_include.size(), 2);
-  EXPECT_EQ(first.aux_include[0], "#32768");
-  EXPECT_EQ(first.aux_include[1], "#32770");
   ASSERT_EQ(first.aux_exclude.size(), 2);
   EXPECT_EQ(first.aux_exclude[0], "tooltips_class32");
   EXPECT_EQ(first.max_fps, 60);
@@ -160,7 +156,6 @@ TEST_F(SessionGroupTest, AppliesDefaultsForMissingFields) {
   EXPECT_EQ(group.max_fps, 60);
   EXPECT_EQ(group.bitrate_kbps, 0);
   EXPECT_TRUE(group.rules.empty());
-  EXPECT_TRUE(group.aux_include.empty());
   EXPECT_TRUE(group.aux_exclude.empty());
 }
 
@@ -609,7 +604,7 @@ namespace {
 TEST(SessionGroupResolveActiveTest, ReturnsNameForSingleWindowGroup) {
   ActiveGroupsGuard guard;
   session_group::active_groups = session_group::groups_config_t {};
-  session_group::active_groups.groups.emplace_back(session_group::config_t {"user1", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, {}, 60, 20000});
+  session_group::active_groups.groups.emplace_back(session_group::config_t {"user1", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, 60, 20000});
 
   EXPECT_EQ(session_group::resolve_active_window_group(), "user1");
 }
@@ -617,7 +612,7 @@ TEST(SessionGroupResolveActiveTest, ReturnsNameForSingleWindowGroup) {
 TEST(SessionGroupResolveActiveTest, ReturnsEmptyWhenNoWindowGroup) {
   ActiveGroupsGuard guard;
   session_group::active_groups = session_group::groups_config_t {};
-  session_group::active_groups.groups.emplace_back(session_group::config_t {"mon", std::string {session_group::CAPTURE_MONITOR}, 48010, 0, {}, {}, {}, 60, 0});
+  session_group::active_groups.groups.emplace_back(session_group::config_t {"mon", std::string {session_group::CAPTURE_MONITOR}, 48010, 0, {}, {}, 60, 0});
 
   EXPECT_TRUE(session_group::resolve_active_window_group().empty());
 }
@@ -625,8 +620,8 @@ TEST(SessionGroupResolveActiveTest, ReturnsEmptyWhenNoWindowGroup) {
 TEST(SessionGroupResolveActiveTest, ReturnsEmptyForMultipleWindowGroups) {
   ActiveGroupsGuard guard;
   session_group::active_groups = session_group::groups_config_t {};
-  session_group::active_groups.groups.emplace_back(session_group::config_t {"a", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, {}, 60, 0});
-  session_group::active_groups.groups.emplace_back(session_group::config_t {"b", std::string {session_group::CAPTURE_WINDOW}, 48011, 0x4D3, {}, {}, {}, 60, 0});
+  session_group::active_groups.groups.emplace_back(session_group::config_t {"a", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, 60, 0});
+  session_group::active_groups.groups.emplace_back(session_group::config_t {"b", std::string {session_group::CAPTURE_WINDOW}, 48011, 0x4D3, {}, {}, 60, 0});
 
   EXPECT_TRUE(session_group::resolve_active_window_group().empty());
 }
@@ -634,7 +629,7 @@ TEST(SessionGroupResolveActiveTest, ReturnsEmptyForMultipleWindowGroups) {
 TEST(SessionGroupResolveLaunchTest, HonorsExplicitGroupName) {
   ActiveGroupsGuard guard;
   session_group::active_groups = session_group::groups_config_t {};
-  session_group::active_groups.groups.emplace_back(session_group::config_t {"a", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, {}, 60, 0});
+  session_group::active_groups.groups.emplace_back(session_group::config_t {"a", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, 60, 0});
 
   EXPECT_EQ(session_group::resolve_launch_group("a"), "a");
   EXPECT_TRUE(session_group::resolve_launch_group("missing").empty());
@@ -643,7 +638,7 @@ TEST(SessionGroupResolveLaunchTest, HonorsExplicitGroupName) {
 TEST(SessionGroupResolveLaunchTest, FallsBackToSingleWindowGroup) {
   ActiveGroupsGuard guard;
   session_group::active_groups = session_group::groups_config_t {};
-  session_group::active_groups.groups.emplace_back(session_group::config_t {"user1", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, {}, 60, 20000});
+  session_group::active_groups.groups.emplace_back(session_group::config_t {"user1", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, 60, 20000});
 
   EXPECT_EQ(session_group::resolve_launch_group(""), "user1");
 }
@@ -651,8 +646,8 @@ TEST(SessionGroupResolveLaunchTest, FallsBackToSingleWindowGroup) {
 TEST(SessionGroupResolveLaunchTest, ReturnsEmptyForMultipleGroupsWithoutExplicitName) {
   ActiveGroupsGuard guard;
   session_group::active_groups = session_group::groups_config_t {};
-  session_group::active_groups.groups.emplace_back(session_group::config_t {"a", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, {}, 60, 0});
-  session_group::active_groups.groups.emplace_back(session_group::config_t {"b", std::string {session_group::CAPTURE_WINDOW}, 48011, 0x4D3, {}, {}, {}, 60, 0});
+  session_group::active_groups.groups.emplace_back(session_group::config_t {"a", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, 60, 0});
+  session_group::active_groups.groups.emplace_back(session_group::config_t {"b", std::string {session_group::CAPTURE_WINDOW}, 48011, 0x4D3, {}, {}, 60, 0});
 
   EXPECT_TRUE(session_group::resolve_launch_group("").empty());
 }
@@ -661,8 +656,8 @@ TEST(SessionGroupResolveLaunchTest, UsesConfiguredDefaultGroup) {
   ActiveGroupsGuard guard;
   session_group::active_groups = session_group::groups_config_t {};
   session_group::active_groups.default_group = "b";
-  session_group::active_groups.groups.emplace_back(session_group::config_t {"a", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, {}, 60, 0});
-  session_group::active_groups.groups.emplace_back(session_group::config_t {"b", std::string {session_group::CAPTURE_WINDOW}, 48011, 0x4D3, {}, {}, {}, 60, 0});
+  session_group::active_groups.groups.emplace_back(session_group::config_t {"a", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, 60, 0});
+  session_group::active_groups.groups.emplace_back(session_group::config_t {"b", std::string {session_group::CAPTURE_WINDOW}, 48011, 0x4D3, {}, {}, 60, 0});
 
   EXPECT_EQ(session_group::resolve_launch_group(""), "b");
   // An explicit group still wins over the default.
@@ -673,7 +668,7 @@ TEST(SessionGroupResolveLaunchTest, IgnoresUnknownDefaultGroup) {
   ActiveGroupsGuard guard;
   session_group::active_groups = session_group::groups_config_t {};
   session_group::active_groups.default_group = "ghost";
-  session_group::active_groups.groups.emplace_back(session_group::config_t {"a", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, {}, 60, 0});
+  session_group::active_groups.groups.emplace_back(session_group::config_t {"a", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, 60, 0});
 
   // "ghost" is not a configured window group, so the lone group wins.
   EXPECT_EQ(session_group::resolve_launch_group(""), "a");
@@ -682,7 +677,7 @@ TEST(SessionGroupResolveLaunchTest, IgnoresUnknownDefaultGroup) {
 TEST(SessionGroupResolveLaunchTest, IgnoresNonWindowGroups) {
   ActiveGroupsGuard guard;
   session_group::active_groups = session_group::groups_config_t {};
-  session_group::active_groups.groups.emplace_back(session_group::config_t {"mon", std::string {session_group::CAPTURE_MONITOR}, 48010, 0, {}, {}, {}, 60, 0});
+  session_group::active_groups.groups.emplace_back(session_group::config_t {"mon", std::string {session_group::CAPTURE_MONITOR}, 48010, 0, {}, {}, 60, 0});
 
   EXPECT_TRUE(session_group::resolve_launch_group("").empty());
   EXPECT_TRUE(session_group::resolve_launch_group("mon").empty());

@@ -211,12 +211,6 @@ namespace session_group {
         }
       }
 
-      if (auto aux_node = group_node.get_child_optional("aux_include")) {
-        for (auto &[_, aux] : *aux_node) {
-          group.aux_include.emplace_back(aux.data());
-        }
-      }
-
       if (auto aux_node = group_node.get_child_optional("aux_exclude")) {
         for (auto &[_, aux] : *aux_node) {
           group.aux_exclude.emplace_back(aux.data());

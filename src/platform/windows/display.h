@@ -900,6 +900,7 @@ namespace platf::dxgi {
     texture2d_t staging;  ///< Cached CPU-readable copy of the latest window frame.
     texture2d_t texture;  ///< Cached GPU copy of the latest window frame (for GPU composition).
     shader_res_t srv;  ///< Shader-resource view over the GPU cache.
+    int z_order {0};  ///< Position in the top-level Z-order (0 = topmost), recomputed each refresh.
     bool has_frame {false};  ///< Whether a frame has been captured and cached.
   };
 
@@ -980,7 +981,7 @@ namespace platf::dxgi {
      * @param sampler Sampler used by the pixel shader.
      * @return 0 on success; nonzero when composition failed.
      */
-    int composite_gpu(ID3D11RenderTargetView *rt, int anchor_width, int anchor_height, vs_t &vs, ps_t &ps, blend_t &blend, sampler_state_t &sampler);
+    void composite_gpu(ID3D11RenderTargetView *rt, int anchor_width, int anchor_height, vs_t &vs, ps_t &ps, blend_t &blend, sampler_state_t &sampler);
 
     /**
      * @brief Composite the auxiliary windows onto a CPU frame buffer.
@@ -1148,19 +1149,19 @@ namespace platf::dxgi {
     blend_t blend_alpha;  ///< Alpha-blend state for window composition.
     sampler_state_t sampler_linear;  ///< Linear sampler used when drawing window textures.
     buf_t window_rotation;  ///< Zero rotation constant buffer required by the window vertex shader.
+    bool gpu_composition_ready {false};  ///< Whether the GPU composition resources were created successfully.
 
     /**
      * @brief Composite auxiliary windows on the GPU onto the capture texture.
      *
      * The anchor frame is copied into the capture texture first, then each
      * auxiliary window is drawn at its screen-relative offset with alpha
-     * blending. Falls back to `composite_cpu_fallback` on failure.
+     * blending in bottom-to-top Z-order.
      *
      * @param d3d_img Capture texture receiving the composite.
      * @param src Anchor window frame texture.
-     * @return 0 on success; nonzero when GPU composition failed.
      */
-    int composite_gpu(img_d3d_t *d3d_img, ID3D11Texture2D *src);
+    void composite_gpu(img_d3d_t *d3d_img, ID3D11Texture2D *src);
     /**
      * @brief Composite auxiliary windows on the CPU and upload the result.
      *

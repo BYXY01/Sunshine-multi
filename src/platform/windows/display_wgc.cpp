@@ -677,6 +677,17 @@ namespace platf::dxgi {
         ++it;
       }
     }
+
+    // Record the real top-level Z-order (0 = topmost) so composition can draw
+    // bottom-to-top and overlapping popups layer correctly.
+    int z = 0;
+    for (HWND window = GetTopWindow(nullptr); window != nullptr; window = GetWindow(window, GW_HWNDNEXT)) {
+      auto it = windows_.find(window);
+      if (it != windows_.end()) {
+        it->second->z_order = z;
+      }
+      ++z;
+    }
     return 0;
   }
 
@@ -773,14 +784,24 @@ namespace platf::dxgi {
     return 0;
   }
 
-  int window_capture_set_t::composite_gpu(ID3D11RenderTargetView *rt, int anchor_width, int anchor_height, vs_t &vs, ps_t &ps, blend_t &blend, sampler_state_t &sampler) {
+  void window_capture_set_t::composite_gpu(ID3D11RenderTargetView *rt, int anchor_width, int anchor_height, vs_t &vs, ps_t &ps, blend_t &blend, sampler_state_t &sampler) {
     display_->device_ctx->OMSetRenderTargets(1, &rt, nullptr);
     display_->device_ctx->VSSetShader(vs.get(), nullptr, 0);
     display_->device_ctx->PSSetShader(ps.get(), nullptr, 0);
     display_->device_ctx->OMSetBlendState(blend.get(), nullptr, 0xFFFFFFFFu);
     display_->device_ctx->PSSetSamplers(0, 1, &sampler);
 
+    // Draw bottom-to-top so that higher windows overwrite lower ones.
+    std::vector<window_item_t *> ordered;
+    ordered.reserve(windows_.size());
     for (auto &[window, item] : windows_) {
+      ordered.push_back(item.get());
+    }
+    std::sort(ordered.begin(), ordered.end(), [](const window_item_t *a, const window_item_t *b) {
+      return a->z_order > b->z_order;
+    });
+
+    for (auto *item : ordered) {
       if (!item->has_frame || !item->srv) {
         continue;
       }
@@ -797,7 +818,6 @@ namespace platf::dxgi {
 
     ID3D11ShaderResourceView *empty_srv = nullptr;
     display_->device_ctx->PSSetShaderResources(0, 1, &empty_srv);
-    return 0;
   }
 
   int window_capture_set_t::composite_cpu(std::uint8_t *frame, std::size_t row_pitch, std::size_t pixel_pitch, int anchor_width, int anchor_height) {
@@ -805,7 +825,17 @@ namespace platf::dxgi {
       return -1;
     }
 
+    // Draw bottom-to-top so that higher windows overwrite lower ones.
+    std::vector<window_item_t *> ordered;
+    ordered.reserve(windows_.size());
     for (auto &[window, item] : windows_) {
+      ordered.push_back(item.get());
+    }
+    std::sort(ordered.begin(), ordered.end(), [](const window_item_t *a, const window_item_t *b) {
+      return a->z_order > b->z_order;
+    });
+
+    for (auto *item : ordered) {
       if (!item->has_frame || !item->staging) {
         continue;
       }
