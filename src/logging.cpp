@@ -282,7 +282,7 @@ namespace logging {
       << "        --hwnd <handle>     | direct Win32 window handle (decimal or 0x hex)"sv << std::endl
       << "        --port <number>     | Moonlight port for the session group"sv << std::endl
       << "        --port-mode <mode>  | global port mode: single-port or per-group-port (required)"sv << std::endl
-      << "        --port-range <range>| per-group-port port range, e.g. 48010-48100"sv << std::endl
+      << "        --port-range <range>| per-group-port port range, e.g. 48100-48110 (must avoid the reserved service ports 47984/47989/47990/48010)"sv << std::endl
       << "        --default-group <name> | group receiving sessions without an explicit group"sv << std::endl
       << "        --config <path>     | load session groups from a JSON file"sv << std::endl
       << std::endl

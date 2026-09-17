@@ -20,7 +20,7 @@ overrides the file.
 ```json
 {
   "port_mode": "per-group-port",
-  "port_range": "48010-48100",
+  "port_range": "48100-48110",
   "default_group": "user1-notepad",
   "session_groups": [
     {
@@ -49,7 +49,7 @@ overrides the file.
 | Field | Description |
 |---|---|
 | `port_mode` | **Required.** `single-port` (one shared RTSP port) or `per-group-port` (one port per group). |
-| `port_range` | **Required for `per-group-port`.** Inclusive port range, e.g. `"48010-48100"`. The number of ports bounds the maximum number of window groups. |
+| `port_range` | **Required for `per-group-port`.** Inclusive port range, e.g. `"48100-48110"`. The number of ports bounds the maximum number of window groups. The range **must not include** the reserved Sunshine service ports (HTTP 47989, HTTPS 47984, Web UI HTTPS 47990, RTSP 48010) — the startup validation rejects such ranges. |
 | `default_group` | Group that receives sessions without an explicit group. In `per-group-port` mode it takes the first port of the range. |
 | `session_groups` | Ordered list of group definitions. |
 
@@ -92,7 +92,7 @@ port; the remaining groups follow in configuration order. Binding each
 group logs its port:
 
 ```
-Session group [user1-notepad] listening on RTSP port 48010
+Session group [user1-notepad] listening on RTSP port 48100
 ```
 
 A group whose port cannot be allocated (the range is exhausted) is refused
@@ -121,7 +121,7 @@ on the CPU and uploading the result.
 | Option | Description |
 |---|---|
 | `--port-mode <mode>` | Global port mode: `single-port` or `per-group-port` (required). |
-| `--port-range <range>` | Per-group port range, e.g. `48010-48100`. |
+| `--port-range <range>` | Per-group port range, e.g. `48100-48110` (must avoid the reserved service ports 47984/47989/47990/48010). |
 | `--default-group <name>` | Group receiving sessions without an explicit group. |
 | `--group <name>` | Name of a single session group. |
 | `--capture <backend>` | Capture backend: `window` or `monitor`. |
@@ -137,5 +137,5 @@ Examples:
 
 ```
 sunshine --port-mode single-port --group user1-notepad --capture window --process notepad.exe
-sunshine --port-mode per-group-port --port-range 48010-48100 --config session-groups.json
+sunshine --port-mode per-group-port --port-range 48100-48110 --config session-groups.json
 ```

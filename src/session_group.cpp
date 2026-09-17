@@ -4,6 +4,7 @@
  */
 // standard includes
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
@@ -68,6 +69,35 @@ namespace session_group {
     }
     return std::pair {*start, *end};
   }
+
+  namespace {
+    /**
+     * @brief Check whether a port range overlaps any reserved Sunshine service port.
+     *
+     * The standard GameStream services own fixed ports regardless of session
+     * groups: HTTP 47989, HTTPS 47984, Web UI HTTPS 47990, and RTSP 48010
+     * (the default listener is always bound to `RTSP_SETUP_PORT`). Allocating a
+     * group port from one of these would bind a second acceptor onto the same
+     * port (allowed by SO_REUSEADDR on Windows), causing incoming RTSP
+     * connections to be delivered to the wrong listener.
+     *
+     * @param bounds Inclusive port range bounds.
+     * @return The first reserved port inside the range, or nullopt when the
+     * range avoids all reserved ports.
+     */
+    std::optional<std::uint16_t> port_range_overlaps_reserved(const std::pair<std::uint16_t, std::uint16_t> &bounds) {
+      static constexpr std::array<std::uint16_t, 4> reserved { 47984, 47989, 47990, 48010 };
+      for (std::uint16_t port = bounds.first;; ++port) {
+        if (std::ranges::find(reserved, port) != reserved.end()) {
+          return port;
+        }
+        if (port == bounds.second) {
+          break;
+        }
+      }
+      return std::nullopt;
+    }
+  }  // namespace
 
   port_allocator_t::port_allocator_t(std::uint16_t start, std::uint16_t end):
       start_ {start},
@@ -248,11 +278,13 @@ namespace session_group {
     if (groups.port_mode == PORT_MODE_PER_GROUP) {
       auto bounds = parse_port_range(groups.port_range);
       if (groups.port_range.empty()) {
-        errors.emplace_back("port_mode 'per-group-port' requires a non-empty port_range (e.g. \"48010-48100\")");
+        errors.emplace_back("port_mode 'per-group-port' requires a non-empty port_range (e.g. \"48100-48110\")");
       } else if (!bounds) {
         errors.emplace_back("invalid port_range '" + groups.port_range + "' (expected \"start-end\" with 1 <= start <= end <= 65535)");
       } else if (groups.groups.size() > static_cast<std::size_t>(bounds->second - bounds->first) + 1) {
         errors.emplace_back("too many session groups (" + std::to_string(groups.groups.size()) + ") for port_range '" + groups.port_range + "'; the range size limits the maximum number of groups");
+      } else if (auto reserved = port_range_overlaps_reserved(*bounds)) {
+        errors.emplace_back("port_range '" + groups.port_range + "' includes reserved Sunshine port " + std::to_string(*reserved) + "; ports 47984/47989/47990/48010 are used by the HTTP/HTTPS/Web UI/RTSP services and must not be allocated to session groups");
       }
     }
 

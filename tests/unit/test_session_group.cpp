@@ -32,12 +32,12 @@ namespace {
     std::string_view valid_groups_json() const {
       return R"({
         "port_mode": "per-group-port",
-        "port_range": "48010-48100",
+        "port_range": "48100-48110",
         "session_groups": [
           {
             "name": "user1-notepad",
             "capture": "window",
-            "port": 48010,
+            "port": 48100,
             "rules": [
               {"box": "cap_u1_notepad"},
               {"process": "notepad.exe"}
@@ -49,7 +49,7 @@ namespace {
           {
             "name": "user2-chrome",
             "capture": "window",
-            "port": 48011,
+            "port": 48101,
             "rules": [
               {"process": "chrome.exe"}
             ]
@@ -66,12 +66,12 @@ TEST_F(SessionGroupTest, ParsesValidGroupConfiguration) {
   ASSERT_TRUE(groups.has_value());
   ASSERT_EQ(groups->groups.size(), 2);
   EXPECT_EQ(groups->port_mode, session_group::PORT_MODE_PER_GROUP);
-  EXPECT_EQ(groups->port_range, "48010-48100");
+  EXPECT_EQ(groups->port_range, "48100-48110");
 
   const auto &first = groups->groups[0];
   EXPECT_EQ(first.name, "user1-notepad");
   EXPECT_EQ(first.capture, session_group::CAPTURE_WINDOW);
-  EXPECT_EQ(first.port, 48010);
+  EXPECT_EQ(first.port, 48100);
   EXPECT_EQ(first.rules.size(), 2);
   EXPECT_EQ(first.rules[0].box, "cap_u1_notepad");
   EXPECT_EQ(first.rules[1].process, "notepad.exe");
@@ -82,7 +82,7 @@ TEST_F(SessionGroupTest, ParsesValidGroupConfiguration) {
 
   const auto &second = groups->groups[1];
   EXPECT_EQ(second.name, "user2-chrome");
-  EXPECT_EQ(second.port, 48011);
+  EXPECT_EQ(second.port, 48101);
   EXPECT_EQ(second.rules.size(), 1);
 }
 
@@ -277,7 +277,7 @@ TEST_F(SessionGroupTest, PerGroupPortRequiresPortRange) {
 
   auto errors = session_group::validate_groups(*groups);
   ASSERT_EQ(errors.size(), 1);
-  EXPECT_EQ(errors[0], "port_mode 'per-group-port' requires a non-empty port_range (e.g. \"48010-48100\")");
+  EXPECT_EQ(errors[0], "port_mode 'per-group-port' requires a non-empty port_range (e.g. \"48100-48110\")");
 }
 
 TEST_F(SessionGroupTest, PerGroupPortRejectsMalformedRange) {
@@ -310,6 +310,21 @@ TEST_F(SessionGroupTest, PerGroupPortRejectsTooManyGroups) {
   auto errors = session_group::validate_groups(*groups);
   ASSERT_EQ(errors.size(), 1);
   EXPECT_EQ(errors[0], "too many session groups (3) for port_range '48010-48011'; the range size limits the maximum number of groups");
+}
+
+TEST_F(SessionGroupTest, PerGroupPortRejectsReservedServicePorts) {
+  for (const auto &range : {"48010-48020"sv, "47984-47985"sv, "47989-47990"sv, "47990-47999"sv}) {
+    auto groups = session_group::parse_groups(std::string {
+      R"({"port_mode": "per-group-port", "port_range": ")" + std::string {range} + R"(", "session_groups": [
+        {"name": "a", "capture": "window", "rules": [{"process": "a.exe"}]}
+      ]})"
+    });
+    ASSERT_TRUE(groups.has_value());
+
+    auto errors = session_group::validate_groups(*groups);
+    ASSERT_EQ(errors.size(), 1) << "range " << range;
+    EXPECT_NE(errors[0].find("includes reserved Sunshine port"), std::string::npos) << "range " << range;
+  }
 }
 
 TEST_F(SessionGroupTest, ParsesDefaultGroup) {

@@ -86,7 +86,7 @@ namespace session_group {
   /**
    * @brief Parse a port range string into its inclusive bounds.
    *
-   * Accepts the "48010-48100" form. The start must be non-zero, the end must
+   * Accepts the "48100-48110" form. The start must be non-zero, the end must
    * not exceed 65535, and start must be less than or equal to end.
    *
    * @param range Raw range text from configuration.
