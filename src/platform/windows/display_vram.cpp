@@ -1876,7 +1876,7 @@ namespace platf::dxgi {
     return 0;
   }
 
-  int display_window_vram_t::init(const ::video::config_t &config, const std::string &display_name, HWND hwnd, const std::vector<std::string> &aux_exclude) {
+  int display_window_vram_t::init(const ::video::config_t &config, const std::string &display_name, HWND hwnd, const std::string_view &session_key, const std::vector<std::string> &aux_exclude) {
     if (init_window_device(this, config)) {
       return -1;
     }
@@ -1937,7 +1937,7 @@ namespace platf::dxgi {
     }
 
     this->hwnd = hwnd;
-    window_set = std::make_unique<window_capture_set_t>(this, config, hwnd, aux_exclude);
+    window_set = std::make_unique<window_capture_set_t>(this, config, hwnd, session_key, aux_exclude);
     window_set->refresh();
 
     // Record the anchor's current client-area size so snapshot() can detect a

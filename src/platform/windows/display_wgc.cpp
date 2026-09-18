@@ -18,6 +18,7 @@
 #include "display.h"
 #include "misc.h"
 #include "src/logging.h"
+#include "src/session_group.h"
 #include "utf_utils.h"
 
 // Gross hack to work around MINGW-packages#22160
@@ -577,9 +578,10 @@ namespace platf::dxgi {
     return result;
   }
 
-  window_capture_set_t::window_capture_set_t(display_base_t *display, const ::video::config_t &config, HWND anchor, const std::vector<std::string> &aux_exclude):
+  window_capture_set_t::window_capture_set_t(display_base_t *display, const ::video::config_t &config, HWND anchor, const std::string_view &session_key, const std::vector<std::string> &aux_exclude):
       display_ {display},
       anchor_ {anchor},
+      session_key_ {session_key},
       aux_exclude_ {aux_exclude},
       config_ {config} {
     DWORD process_id = 0;
@@ -599,7 +601,7 @@ namespace platf::dxgi {
     return windows_.empty();
   }
 
-  bool window_capture_set_t::should_capture(HWND candidate) const {
+  bool window_capture_set_t::should_capture(HWND candidate, const std::vector<std::string> &excluded) const {
     if (candidate == nullptr || candidate == anchor_) {
       return false;
     }
@@ -612,8 +614,8 @@ namespace platf::dxgi {
       return false;
     }
     auto class_name = window_class_name_lower(candidate);
-    for (const auto &excluded : aux_exclude_) {
-      if (class_name == to_ascii_lower(excluded)) {
+    for (const auto &exclude : excluded) {
+      if (class_name == to_ascii_lower(exclude)) {
         return false;
       }
     }
@@ -647,31 +649,46 @@ namespace platf::dxgi {
       return -1;
     }
 
-    struct enum_ctx_t {
-      std::uint32_t pid;  ///< Process ID to match.
-      std::vector<HWND> present;  ///< Visible top-level windows of the process.
-    };
-    enum_ctx_t ctx {pid_, {}};
+    // Read this session's runtime state once per frame so attach/detach/filter
+    // commands forwarded over IPC take effect on the next captured frame.
+    const auto runtime = session_group::session_runtime_snapshot(session_key_);
+
+    std::vector<std::string> excluded = aux_exclude_;
+    excluded.insert(excluded.end(), runtime.extra_exclude.begin(), runtime.extra_exclude.end());
+
+    // Enumerate all top-level windows: manually attached windows may belong to
+    // a different process than the anchor, so the enumeration is not limited to
+    // the bound process.
+    std::vector<HWND> present;
     EnumWindows([](HWND window, LPARAM lparam) -> BOOL {
-      auto *data = reinterpret_cast<enum_ctx_t *>(lparam);
-      DWORD window_pid = 0;
-      GetWindowThreadProcessId(window, &window_pid);
-      if (window_pid == data->pid) {
-        data->present.push_back(window);
-      }
+      reinterpret_cast<std::vector<HWND> *>(lparam)->push_back(window);
       return TRUE;
     },
-      reinterpret_cast<LPARAM>(&ctx));
+      reinterpret_cast<LPARAM>(&present));
 
-    for (auto window : ctx.present) {
-      if (should_capture(window)) {
+    for (auto window : present) {
+      const bool force = runtime.manual_attach.find(reinterpret_cast<std::uintptr_t>(window)) != runtime.manual_attach.end();
+      const bool blocked = runtime.manual_detach.find(reinterpret_cast<std::uintptr_t>(window)) != runtime.manual_detach.end();
+      if (blocked) {
+        continue;
+      }
+      if (force) {
+        // Manually attached windows bypass the process/class filters.
+        if (IsWindowVisible(window) && !IsIconic(window)) {
+          attach_window(window);
+        }
+        continue;
+      }
+      if (should_capture(window, excluded)) {
         attach_window(window);
       }
     }
 
     for (auto it = windows_.begin(); it != windows_.end();) {
-      const bool still_present = std::find(ctx.present.begin(), ctx.present.end(), it->first) != ctx.present.end();
-      if (!still_present || !should_capture(it->first)) {
+      const bool still_present = std::find(present.begin(), present.end(), it->first) != present.end();
+      const bool force = runtime.manual_attach.find(reinterpret_cast<std::uintptr_t>(it->first)) != runtime.manual_attach.end();
+      const bool blocked = runtime.manual_detach.find(reinterpret_cast<std::uintptr_t>(it->first)) != runtime.manual_detach.end();
+      if (!still_present || blocked || (!force && !should_capture(it->first, excluded))) {
         it = windows_.erase(it);
       } else {
         ++it;
@@ -922,7 +939,7 @@ namespace platf::dxgi {
     return 0;
   }
 
-  int display_window_t::init(const ::video::config_t &config, const std::string &display_name, HWND hwnd, const std::vector<std::string> &aux_exclude) {
+  int display_window_t::init(const ::video::config_t &config, const std::string &display_name, HWND hwnd, const std::string_view &session_key, const std::vector<std::string> &aux_exclude) {
     if (init_window_device(this, config)) {
       return -1;
     }
@@ -932,7 +949,7 @@ namespace platf::dxgi {
     }
 
     this->hwnd = hwnd;
-    window_set = std::make_unique<window_capture_set_t>(this, config, hwnd, aux_exclude);
+    window_set = std::make_unique<window_capture_set_t>(this, config, hwnd, session_key, aux_exclude);
     window_set->refresh();
 
     // Record the anchor's current client-area size so snapshot() can detect a

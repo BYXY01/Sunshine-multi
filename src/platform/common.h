@@ -919,7 +919,7 @@ namespace platf {
    * select the target group (empty selects the first configured window group).
    * @return The display_t instance based on hwdevice_type.
    */
-  std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config, const std::string_view &group_name = {});
+  std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config, const std::string_view &group_name = {}, const std::string_view &session_key = {});
 
   // A list of names of displays accepted as display_name with the mem_type_e
   /**

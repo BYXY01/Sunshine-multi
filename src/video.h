@@ -705,7 +705,8 @@ namespace video {
     safe::mail_t mail,
     config_t config,
     void *channel_data,
-    const std::string &group_name = {}
+    const std::string &group_name = {},
+    const std::string &session_key = {}
   );
 
   /**

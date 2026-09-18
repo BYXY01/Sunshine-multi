@@ -673,6 +673,7 @@ namespace video {
     const encoder_t *encoder_p;  ///< Encoder p.
     sync_util::sync_t<std::weak_ptr<platf::display_t>> display_wp;  ///< Display wp.
     std::string group_name;  ///< Session group name; empty selects the legacy single display.
+    std::string session_key;  ///< Session identifier; used to key the per-session display and runtime state.
   };
 
   /**
@@ -714,31 +715,36 @@ namespace video {
   auto capture_thread_sync = safe::make_shared<capture_thread_sync_ctx_t>(start_capture_sync, end_capture_sync);  ///< Capture thread sync.
 
   /**
-   * @brief Look up or lazily create the capture thread for a session group.
+   * @brief Look up or lazily create the capture thread for a single session.
    *
-   * Each configured window-capture group owns its own capture thread and
-   * display, so its clients share a single capture stream. The returned
-   * reference keeps the group's thread alive; when the last client releases
-   * it, the thread is stopped and the group entry is erased.
+   * Each streaming session owns its own capture thread and display, so its
+   * window composition (anchor plus runtime attach/detach/filter) is
+   * independent from other sessions in the same group. The returned reference
+   * keeps the session's thread alive; when the last client releases it, the
+   * thread is stopped and the entry is erased.
    *
    * @param group_name Session group name.
-   * @return Reference to the group's capture context, or null when the group
-   * is unknown.
+   * @param session_key Session identifier (client name).
+   * @return Reference to the session's capture context, or null on failure.
    */
-  safe::shared_t<capture_thread_async_ctx_t>::ptr_t capture_group_ref(const std::string &group_name) {
+  safe::shared_t<capture_thread_async_ctx_t>::ptr_t capture_session_ref(const std::string &group_name, const std::string &session_key) {
     static std::mutex mutex;
-    static std::unordered_map<std::string, std::shared_ptr<safe::shared_t<capture_thread_async_ctx_t>>> groups;
+    static std::unordered_map<std::string, std::shared_ptr<safe::shared_t<capture_thread_async_ctx_t>>> sessions;
+
+    // Key by group and session so two clients of the same group get independent
+    // capture threads and displays.
+    const std::string key = group_name + '\0' + session_key;
 
     std::lock_guard lg {mutex};
 
-    auto &entry = groups[group_name];
+    auto &entry = sessions[key];
     if (!entry) {
-      auto bound_name = group_name;  // copy so the stored callback stays valid
       entry = std::make_shared<safe::shared_t<capture_thread_async_ctx_t>>(
-        [bound_name = std::move(bound_name)](capture_thread_async_ctx_t &ctx) mutable {
-          // Bind the group name before the capture thread starts so it can
-          // create the correct display.
-          ctx.group_name = bound_name;
+        [bound_group = group_name, bound_session = session_key](capture_thread_async_ctx_t &ctx) mutable {
+          // Bind the group and session identifiers before the capture thread
+          // starts so it can create the correct per-session display.
+          ctx.group_name = std::move(bound_group);
+          ctx.session_key = std::move(bound_session);
           return start_capture_async(ctx);
         },
         end_capture_async
@@ -751,7 +757,7 @@ namespace video {
     }
 
     // Construction failed; drop the broken entry so a later attempt retries.
-    groups.erase(group_name);
+    sessions.erase(key);
     return {};
   }
 
@@ -1499,12 +1505,14 @@ namespace video {
    * @param type Protocol, message, or resource type selector.
    * @param display_name Display name.
    * @param config Configuration values to apply.
+   * @param group_name Optional session group name.
+   * @param session_key Optional session identifier.
    */
-  void reset_display(std::shared_ptr<platf::display_t> &disp, const platf::mem_type_e &type, const std::string &display_name, const config_t &config) {
+  void reset_display(std::shared_ptr<platf::display_t> &disp, const platf::mem_type_e &type, const std::string &display_name, const config_t &config, const std::string_view &group_name = {}, const std::string_view &session_key = {}) {
     // We try this twice, in case we still get an error on reinitialization
     for (int x = 0; x < 2; ++x) {
       disp.reset();
-      disp = platf::display(type, display_name, config);
+      disp = platf::display(type, display_name, config, group_name, session_key);
       if (disp) {
         break;
       }
@@ -1581,7 +1589,8 @@ namespace video {
     sync_util::sync_t<std::weak_ptr<platf::display_t>> &display_wp,
     safe::signal_t &reinit_event,
     const encoder_t &encoder,
-    const std::string_view &group_name
+    const std::string_view &group_name,
+    const std::string_view &session_key
   ) {
     std::vector<capture_ctx_t> capture_ctxs;
 
@@ -1611,7 +1620,7 @@ namespace video {
     std::vector<std::string> display_names;
     int display_p = -1;
     refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
-    auto disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config, group_name);
+    auto disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config, group_name, session_key);
     if (!disp) {
       return;
     }
@@ -1807,7 +1816,7 @@ namespace video {
               }
 
               // reset_display() will sleep between retries
-              reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
+              reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config, group_name, session_key);
               if (disp) {
                 break;
               }
@@ -2894,7 +2903,8 @@ namespace video {
     safe::mail_t mail,
     config_t &config,
     void *channel_data,
-    const std::string &group_name = {}
+    const std::string &group_name = {},
+    const std::string &session_key = {}
   ) {
     auto shutdown_event = mail->event<bool>(mail::shutdown);
 
@@ -2904,9 +2914,9 @@ namespace video {
       shutdown_event->raise(true);
     });
 
-    // Select the capture context: the session-group thread when a group is
-    // named, otherwise the legacy shared thread.
-    auto group_ref = group_name.empty() ? safe::shared_t<capture_thread_async_ctx_t>::ptr_t {} : capture_group_ref(group_name);
+    // Select the capture context: the per-session thread when a group is named,
+    // otherwise the legacy shared thread.
+    auto group_ref = group_name.empty() ? safe::shared_t<capture_thread_async_ctx_t>::ptr_t {} : capture_session_ref(group_name, session_key);
     auto ref = group_ref ? std::move(group_ref) : capture_thread_async.ref();
     if (!ref) {
       return;
@@ -2984,12 +2994,15 @@ namespace video {
    * @param mail Session mail bus.
    * @param config Client-requested video configuration, normalized before capture begins.
    * @param channel_data Opaque channel data passed to packets.
+   * @param group_name Session group name (may be empty for the legacy path).
+   * @param session_key Session identifier used to key the per-session display.
    */
   void capture(
     safe::mail_t mail,
     config_t config,
     void *channel_data,
-    const std::string &group_name
+    const std::string &group_name,
+    const std::string &session_key
   ) {
     config = resolve_dynamic_range(*chosen_encoder, config);
 
@@ -2997,7 +3010,7 @@ namespace video {
 
     idr_events->raise(true);
     if (chosen_encoder->flags & PARALLEL_ENCODING) {
-      capture_async(std::move(mail), config, channel_data, group_name);
+      capture_async(std::move(mail), config, channel_data, group_name, session_key);
     } else {
       safe::signal_t join_event;
       auto ref = capture_thread_sync.ref();
@@ -3685,7 +3698,8 @@ namespace video {
       std::ref(capture_thread_ctx.display_wp),
       std::ref(capture_thread_ctx.reinit_event),
       std::ref(*capture_thread_ctx.encoder_p),
-      std::string {capture_thread_ctx.group_name}
+      std::string {capture_thread_ctx.group_name},
+      std::string {capture_thread_ctx.session_key}
     };
 
     return 0;

@@ -1014,7 +1014,7 @@ namespace platf {
    * Pick a display adapter and capture method.
    * @param hwdevice_type enables possible use of hardware encoder
    */
-  std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config, const std::string_view &group_name) {
+  std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config, const std::string_view &group_name, const std::string_view &session_key) {
     if (config::video.capture == "window") {
       // Prefer the group identified by group_name, then fall back to the first
       // window group.
@@ -1045,12 +1045,12 @@ namespace platf {
       // encoders use the RAM backend (no GPU->CPU staging for hardware).
       if (hwdevice_type == mem_type_e::dxgi) {
         auto disp = std::make_shared<dxgi::display_window_vram_t>();
-        if (!disp->init(config, display_name, (HWND) target_hwnd, selected_group->aux_exclude)) {
+        if (!disp->init(config, display_name, (HWND) target_hwnd, session_key, selected_group->aux_exclude)) {
           return disp;
         }
       } else {
         auto disp = std::make_shared<dxgi::display_window_t>();
-        if (!disp->init(config, display_name, (HWND) target_hwnd, selected_group->aux_exclude)) {
+        if (!disp->init(config, display_name, (HWND) target_hwnd, session_key, selected_group->aux_exclude)) {
           return disp;
         }
       }

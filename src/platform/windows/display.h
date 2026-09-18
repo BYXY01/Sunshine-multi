@@ -924,7 +924,7 @@ namespace platf::dxgi {
      * @param anchor Anchor window matched by the group rules.
      * @param aux_exclude Window classes excluded from the frame.
      */
-    window_capture_set_t(display_base_t *display, const ::video::config_t &config, HWND anchor, const std::vector<std::string> &aux_exclude);
+    window_capture_set_t(display_base_t *display, const ::video::config_t &config, HWND anchor, const std::string_view &session_key, const std::vector<std::string> &aux_exclude = {});
 
     /**
      * @brief Re-enumerate the process windows and refresh the set.
@@ -1003,10 +1003,15 @@ namespace platf::dxgi {
     /**
      * @brief Check whether a top-level window should be captured.
      *
+     * The window is rejected when it is the anchor, belongs to a different
+     * process, is not visible, or its class appears in the effective exclude
+     * list (static `aux_exclude` merged with the session's runtime excludes).
+     *
      * @param candidate Window handle to evaluate.
+     * @param excluded Effective exclude classes.
      * @return True when the window should be added to the set.
      */
-    bool should_capture(HWND candidate) const;
+    bool should_capture(HWND candidate, const std::vector<std::string> &excluded) const;
     /**
      * @brief Add a new window of the process to the set.
      *
@@ -1045,6 +1050,7 @@ namespace platf::dxgi {
     display_base_t *display_;  ///< Display backend supplying the D3D device.
     HWND anchor_;  ///< Anchor window handle.
     std::uint32_t pid_ {0};  ///< Process bound by the anchor window.
+    std::string session_key_;  ///< Session identifier used to read the per-session runtime state.
     std::vector<std::string> aux_exclude_;  ///< Window classes excluded from the frame.
     ::video::config_t config_;  ///< Capture configuration for WGC item creation.
     std::map<HWND, std::unique_ptr<window_item_t>> windows_;  ///< Auxiliary windows keyed by handle.
@@ -1080,7 +1086,7 @@ namespace platf::dxgi {
      * @param aux_exclude Window classes excluded from the frame.
      * @return 0 on success; nonzero or negative platform status on failure.
      */
-    int init(const ::video::config_t &config, const std::string &display_name, HWND hwnd, const std::vector<std::string> &aux_exclude = {});
+    int init(const ::video::config_t &config, const std::string &display_name, HWND hwnd, const std::string_view &session_key = {}, const std::vector<std::string> &aux_exclude = {});
     /**
      * @brief Capture a window frame into the provided image object.
      *
@@ -1190,7 +1196,7 @@ namespace platf::dxgi {
      * @param aux_exclude Window classes excluded from the frame.
      * @return 0 on success; nonzero or negative platform status on failure.
      */
-    int init(const ::video::config_t &config, const std::string &display_name, HWND hwnd, const std::vector<std::string> &aux_exclude = {});
+    int init(const ::video::config_t &config, const std::string &display_name, HWND hwnd, const std::string_view &session_key = {}, const std::vector<std::string> &aux_exclude = {});
     /**
      * @brief Capture a window frame into the provided image object.
      *
