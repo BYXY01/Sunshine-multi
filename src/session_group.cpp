@@ -173,6 +173,60 @@ namespace session_group {
     group_ports.clear();
   }
 
+  namespace {
+    std::mutex session_runtime_mutex;  ///< Guards the per-session runtime window capture state.
+    std::unordered_map<std::string, session_runtime_t> session_runtime_states;  ///< Session identifier to runtime state.
+  }  // namespace
+
+  void session_runtime_attach(const std::string &session, std::uintptr_t hwnd) {
+    if (session.empty() || hwnd == 0) {
+      return;
+    }
+    std::scoped_lock lock {session_runtime_mutex};
+    auto &state = session_runtime_states[session];
+    state.manual_attach.insert(hwnd);
+    state.manual_detach.erase(hwnd);
+  }
+
+  void session_runtime_detach(const std::string &session, std::uintptr_t hwnd) {
+    if (session.empty() || hwnd == 0) {
+      return;
+    }
+    std::scoped_lock lock {session_runtime_mutex};
+    auto &state = session_runtime_states[session];
+    state.manual_detach.insert(hwnd);
+    state.manual_attach.erase(hwnd);
+  }
+
+  void session_runtime_add_exclude(const std::string &session, const std::string &window_class) {
+    if (session.empty() || window_class.empty()) {
+      return;
+    }
+    std::scoped_lock lock {session_runtime_mutex};
+    auto &classes = session_runtime_states[session].extra_exclude;
+    if (std::find(classes.begin(), classes.end(), window_class) == classes.end()) {
+      classes.push_back(window_class);
+    }
+  }
+
+  void session_runtime_remove_exclude(const std::string &session, const std::string &window_class) {
+    if (session.empty() || window_class.empty()) {
+      return;
+    }
+    std::scoped_lock lock {session_runtime_mutex};
+    auto &classes = session_runtime_states[session].extra_exclude;
+    classes.erase(std::remove(classes.begin(), classes.end(), window_class), classes.end());
+  }
+
+  session_runtime_t session_runtime_snapshot(const std::string &session) {
+    std::scoped_lock lock {session_runtime_mutex};
+    auto it = session_runtime_states.find(session);
+    if (it == session_runtime_states.end()) {
+      return {};
+    }
+    return it->second;
+  }
+
   /**
    * @brief Parse a window handle string into a numeric HWND value.
    *

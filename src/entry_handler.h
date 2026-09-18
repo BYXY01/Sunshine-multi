@@ -9,6 +9,7 @@
 #include <string_view>
 
 // local includes
+#include "ipc.h"
 #include "thread_pool.h"
 #include "thread_safe.h"
 
@@ -74,6 +75,44 @@ namespace args {
    */
   int restore_nvprefs_undo();
 #endif
+
+  /**
+   * @brief Forward an `attach <hwnd> --session <name>` command to the resident instance.
+   * @param name The name of the program.
+   * @param argc The number of arguments.
+   * @param argv The arguments.
+   * @return Process exit code after forwarding the command.
+   */
+  int attach(const char *name, int argc, char *argv[]);
+
+  /**
+   * @brief Forward a `detach <hwnd> --session <name>` command to the resident instance.
+   * @param name The name of the program.
+   * @param argc The number of arguments.
+   * @param argv The arguments.
+   * @return Process exit code after forwarding the command.
+   */
+  int detach(const char *name, int argc, char *argv[]);
+
+  /**
+   * @brief Forward a `filter --add|--remove <class> --session <name>` command.
+   * @param name The name of the program.
+   * @param argc The number of arguments.
+   * @param argv The arguments.
+   * @return Process exit code after forwarding the command.
+   */
+  int filter(const char *name, int argc, char *argv[]);
+
+  /**
+   * @brief Apply a control command received over the IPC channel.
+   *
+   * Resolves the target session and applies the attach/detach/filter to the
+   * thread-safe per-session runtime table consumed by the capture threads.
+   *
+   * @param cmd Command to apply.
+   * @return Human-readable reply.
+   */
+  std::string apply_control_command(const ipc::command_t &cmd);
 }  // namespace args
 
 /**

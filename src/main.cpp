@@ -31,6 +31,7 @@
 #include "process.h"
 #include "system_tray.h"
 #include "upnp.h"
+#include "utility.h"
 #include "video.h"
 
 using namespace std::literals;
@@ -75,8 +76,17 @@ std::map<std::string_view, std::function<int(const char *name, int argc, char **
 #ifdef _WIN32
   {"restore-nvprefs-undo"sv, [](const char *name, int argc, char **argv) {
      return args::restore_nvprefs_undo();
-   }},
+    }},
 #endif
+  {"attach"sv, [](const char *name, int argc, char **argv) {
+     return args::attach(name, argc, argv);
+    }},
+  {"detach"sv, [](const char *name, int argc, char **argv) {
+     return args::detach(name, argc, argv);
+    }},
+  {"filter"sv, [](const char *name, int argc, char **argv) {
+     return args::filter(name, argc, argv);
+    }},
 };
 
 #ifdef _WIN32
@@ -242,6 +252,20 @@ int main(int argc, char *argv[]) {
 
     return fn->second(argv[0], config::sunshine.cmd.argc, config::sunshine.cmd.argv);
   }
+
+  // Control IPC: enforce a single resident instance and start the command
+  // server so runtime attach/detach/filter commands can be forwarded from a
+  // short-lived CLI process into this running instance.
+  ipc::set_handler([](const ipc::command_t &cmd) {
+    return args::apply_control_command(cmd);
+  });
+  if (ipc::start() != 0) {
+    BOOST_LOG(fatal) << "Another Sunshine instance is already running; refusing to start a second service body"sv;
+    return -1;
+  }
+  auto ipc_deinit_guard = util::fail_guard([&]() {
+    ipc::stop();
+  });
 
 #ifdef _WIN32
   config::select_all_gamepad_drivers_if_licensed(lvh::get_license_status().license.licensed());

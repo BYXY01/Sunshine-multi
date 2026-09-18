@@ -17,6 +17,8 @@
 #include "logging.h"
 #include "network.h"
 #include "platform/common.h"
+#include "session_group.h"
+#include "utility.h"
 
 extern "C" {
 #ifdef _WIN32
@@ -64,6 +66,127 @@ namespace args {
     return 0;
   }
 #endif
+
+  namespace {
+    /**
+     * @brief Extract the `--session <name>` value from command arguments.
+     *
+     * @param argc Number of arguments.
+     * @param argv Argument vector.
+     * @param session Output session identifier.
+     * @return True when `--session` is absent or carries a value; false when it
+     * is present without a value.
+     */
+    bool extract_session(int argc, char *argv[], std::string &session) {
+      for (int i = 0; i < argc; ++i) {
+        if (argv[i] == "--session"sv) {
+          if (i + 1 >= argc) {
+            return false;
+          }
+          session = argv[i + 1];
+          return true;
+        }
+      }
+      return true;
+    }
+  }  // namespace
+
+  int attach(const char *name, int argc, char *argv[]) {
+    if (argc < 1 || argv[0] == "help"sv) {
+      return help(name);
+    }
+
+    ipc::command_t cmd;
+    cmd.action = "attach";
+    if (!extract_session(argc, argv, cmd.session)) {
+      BOOST_LOG(error) << "attach: --session requires a value"sv;
+      return -1;
+    }
+    cmd.hwnd = session_group::parse_hwnd(argv[0]);
+    if (cmd.hwnd == 0 || cmd.session.empty()) {
+      BOOST_LOG(error) << "attach: usage: sunshine --attach <hwnd> --session <name>"sv;
+      return -1;
+    }
+    return ipc::send(cmd);
+  }
+
+  int detach(const char *name, int argc, char *argv[]) {
+    if (argc < 1 || argv[0] == "help"sv) {
+      return help(name);
+    }
+
+    ipc::command_t cmd;
+    cmd.action = "detach";
+    if (!extract_session(argc, argv, cmd.session)) {
+      BOOST_LOG(error) << "detach: --session requires a value"sv;
+      return -1;
+    }
+    cmd.hwnd = session_group::parse_hwnd(argv[0]);
+    if (cmd.hwnd == 0 || cmd.session.empty()) {
+      BOOST_LOG(error) << "detach: usage: sunshine --detach <hwnd> --session <name>"sv;
+      return -1;
+    }
+    return ipc::send(cmd);
+  }
+
+  int filter(const char *name, int argc, char *argv[]) {
+    if (argc < 2 || argv[0] == "help"sv) {
+      return help(name);
+    }
+
+    ipc::command_t cmd;
+    cmd.action = "filter";
+    if (!extract_session(argc, argv, cmd.session)) {
+      BOOST_LOG(error) << "filter: --session requires a value"sv;
+      return -1;
+    }
+    if (argv[0] == "--add"sv) {
+      cmd.filter_remove = false;
+    } else if (argv[0] == "--remove"sv) {
+      cmd.filter_remove = true;
+    } else {
+      BOOST_LOG(error) << "filter: usage: sunshine --filter --add|--remove <class> --session <name>"sv;
+      return -1;
+    }
+    cmd.window_class = argv[1];
+    if (cmd.session.empty()) {
+      BOOST_LOG(error) << "filter: --session is required"sv;
+      return -1;
+    }
+    return ipc::send(cmd);
+  }
+
+  std::string apply_control_command(const ipc::command_t &cmd) {
+    if (cmd.session.empty()) {
+      return "ERR missing --session";
+    }
+    if (cmd.action == "attach") {
+      if (cmd.hwnd == 0) {
+        return "ERR attach requires a window handle";
+      }
+      session_group::session_runtime_attach(cmd.session, cmd.hwnd);
+      return std::string {"OK attached 0x"} + std::string {util::hex(cmd.hwnd).to_string_view()} + " to session '" + cmd.session + "'";
+    }
+    if (cmd.action == "detach") {
+      if (cmd.hwnd == 0) {
+        return "ERR detach requires a window handle";
+      }
+      session_group::session_runtime_detach(cmd.session, cmd.hwnd);
+      return std::string {"OK detached 0x"} + std::string {util::hex(cmd.hwnd).to_string_view()} + " from session '" + cmd.session + "'";
+    }
+    if (cmd.action == "filter") {
+      if (cmd.window_class.empty()) {
+        return "ERR filter requires a window class";
+      }
+      if (cmd.filter_remove) {
+        session_group::session_runtime_remove_exclude(cmd.session, cmd.window_class);
+        return "OK unexcluded class '" + cmd.window_class + "' for session '" + cmd.session + "'";
+      }
+      session_group::session_runtime_add_exclude(cmd.session, cmd.window_class);
+      return "OK excluded class '" + cmd.window_class + "' for session '" + cmd.session + "'";
+    }
+    return "ERR unknown action '" + cmd.action + "'";
+  }
 }  // namespace args
 
 namespace lifetime {

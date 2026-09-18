@@ -2059,30 +2059,35 @@ namespace config {
       BOOST_LOG(fatal) << "Failed to apply config: "sv << err.what();
     }
 
-    // Load and validate the active session groups from CLI options.
-    auto session_groups = session_group::groups_from_cli(session_group_cli);
-    if (!session_groups) {
-      BOOST_LOG(fatal) << "Failed to load session groups configuration"sv;
-      return -1;
-    }
-    auto session_group_errors = session_group::validate_groups(*session_groups);
-    if (!session_group_errors.empty()) {
-      for (const auto &error : session_group_errors) {
-        BOOST_LOG(fatal) << "Invalid session groups configuration: "sv << error;
+    // Load and validate the active session groups from CLI options. CLI
+    // sub-commands (creds/attach/detach/filter/...) are short-lived control
+    // invocations and do not configure session groups, so skip this entirely
+    // for them.
+    if (sunshine.cmd.name.empty()) {
+      auto session_groups = session_group::groups_from_cli(session_group_cli);
+      if (!session_groups) {
+        BOOST_LOG(fatal) << "Failed to load session groups configuration"sv;
+        return -1;
       }
-      return -1;
-    }
-    session_group::active_groups = std::move(*session_groups);
-    if (!session_group::active_groups.groups.empty()) {
-      BOOST_LOG(info) << "Loaded "sv << session_group::active_groups.groups.size() << " session group(s)"sv;
-      // A window capture session group implicitly selects the window capture backend.
-      if (std::ranges::any_of(session_group::active_groups.groups, [](const auto &group) { return group.is_window_capture(); })) {
-        if (config::video.capture.empty()) {
-          config::video.capture = std::string {session_group::CAPTURE_WINDOW};
-          BOOST_LOG(info) << "Enabled window capture backend"sv;
+      auto session_group_errors = session_group::validate_groups(*session_groups);
+      if (!session_group_errors.empty()) {
+        for (const auto &error : session_group_errors) {
+          BOOST_LOG(fatal) << "Invalid session groups configuration: "sv << error;
         }
-        // Window capture supports both software (RAM) and hardware (VRAM)
-        // encoders; the display factory chooses the backend per encoder.
+        return -1;
+      }
+      session_group::active_groups = std::move(*session_groups);
+      if (!session_group::active_groups.groups.empty()) {
+        BOOST_LOG(info) << "Loaded "sv << session_group::active_groups.groups.size() << " session group(s)"sv;
+        // A window capture session group implicitly selects the window capture backend.
+        if (std::ranges::any_of(session_group::active_groups.groups, [](const auto &group) { return group.is_window_capture(); })) {
+          if (config::video.capture.empty()) {
+            config::video.capture = std::string {session_group::CAPTURE_WINDOW};
+            BOOST_LOG(info) << "Enabled window capture backend"sv;
+          }
+          // Window capture supports both software (RAM) and hardware (VRAM)
+          // encoders; the display factory chooses the backend per encoder.
+        }
       }
     }
 

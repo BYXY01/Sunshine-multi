@@ -16,6 +16,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 namespace session_group {
@@ -182,6 +183,60 @@ namespace session_group {
    * `config::parse`. Consumed by the capture orchestration layer.
    */
   extern groups_config_t active_groups;
+
+  /**
+   * @brief Runtime-mutable window capture state for a single streaming session.
+   *
+   * Populated through the runtime `attach` / `detach` / `filter` commands
+   * (forwarded over the control IPC channel from a short-lived CLI process).
+   * The capture thread reads a snapshot on every refresh so changes take
+   * effect on the next captured frame.
+   */
+  struct session_runtime_t {
+    std::unordered_set<std::uintptr_t> manual_attach;  ///< Windows force-included by `attach <hwnd>`.
+    std::unordered_set<std::uintptr_t> manual_detach;  ///< Windows force-excluded by `detach <hwnd>`.
+    std::vector<std::string> extra_exclude;  ///< Extra window classes excluded by `filter`, beyond `aux_exclude`.
+  };
+
+  /**
+   * @brief Force-include a window in a session's composition at runtime.
+   *
+   * @param session Session identifier (client name).
+   * @param hwnd Window handle to include.
+   */
+  void session_runtime_attach(const std::string &session, std::uintptr_t hwnd);
+
+  /**
+   * @brief Force-exclude a window from a session's composition at runtime.
+   *
+   * @param session Session identifier (client name).
+   * @param hwnd Window handle to exclude.
+   */
+  void session_runtime_detach(const std::string &session, std::uintptr_t hwnd);
+
+  /**
+   * @brief Add a window class to a session's runtime exclude list.
+   *
+   * @param session Session identifier (client name).
+   * @param window_class Window class name to exclude.
+   */
+  void session_runtime_add_exclude(const std::string &session, const std::string &window_class);
+
+  /**
+   * @brief Remove a window class from a session's runtime exclude list.
+   *
+   * @param session Session identifier (client name).
+   * @param window_class Window class name to re-admit.
+   */
+  void session_runtime_remove_exclude(const std::string &session, const std::string &window_class);
+
+  /**
+   * @brief Snapshot a session's runtime window capture state.
+   *
+   * @param session Session identifier (client name).
+   * @return Snapshot of the session's runtime state.
+   */
+  session_runtime_t session_runtime_snapshot(const std::string &session);
 
   /**
    * @brief Parse session group configuration from JSON text.
