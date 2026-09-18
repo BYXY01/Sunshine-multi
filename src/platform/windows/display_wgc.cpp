@@ -935,6 +935,15 @@ namespace platf::dxgi {
     window_set = std::make_unique<window_capture_set_t>(this, config, hwnd, aux_exclude);
     window_set->refresh();
 
+    // Record the anchor's current client-area size so snapshot() can detect a
+    // window resize and reinitialize the WGC capture even when the captured
+    // frame size does not follow the window (WGC frames can lag window sizes).
+    RECT client_rect {};
+    if (GetClientRect(hwnd, &client_rect)) {
+      last_window_w = client_rect.right - client_rect.left;
+      last_window_h = client_rect.bottom - client_rect.top;
+    }
+
     BOOST_LOG(info) << "Window capture initialized: ["sv << width << 'x' << height << "] hwnd=0x"sv << util::hex((std::uintptr_t) hwnd).to_string_view();
     texture.reset();
     return 0;
@@ -965,6 +974,21 @@ namespace platf::dxgi {
     auto frame_timestamp = std::chrono::steady_clock::now() - qpc_time_difference(qpc_counter(), frame_qpc);
     D3D11_TEXTURE2D_DESC desc;
     src->GetDesc(&desc);
+
+    // Detect window resizes independently of the WGC frame size: WGC capture
+    // frames can lag (or never follow) the window's real size, so a resized
+    // window must force a reinit to recreate the capture at the new size.
+    RECT client_rect {};
+    if (GetClientRect(hwnd, &client_rect)) {
+      const int client_w = client_rect.right - client_rect.left;
+      const int client_h = client_rect.bottom - client_rect.top;
+      if (last_window_w != 0 && (client_w != last_window_w || client_h != last_window_h)) {
+        BOOST_LOG(info) << "Window capture window resized: client="sv << last_window_w << 'x' << last_window_h << " -> "sv << client_w << 'x' << client_h;
+        last_window_w = client_w;
+        last_window_h = client_h;
+        return capture_e::reinit;
+      }
+    }
 
     // Create the staging texture if it doesn't exist. It should match the source in size and format.
     if (texture == nullptr) {

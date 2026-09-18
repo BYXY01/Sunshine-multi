@@ -1067,6 +1067,8 @@ namespace platf::dxgi {
     wgc_capture_t wgc;  ///< WGC capture session for the anchor window.
     HWND hwnd {nullptr};  ///< Anchor window handle (matched by the group rules).
     std::unique_ptr<window_capture_set_t> window_set;  ///< Process-window composition set.
+    int last_window_w {0};  ///< Last observed anchor client-area width, used to detect window resizes.
+    int last_window_h {0};  ///< Last observed anchor client-area height, used to detect window resizes.
 
   public:
     /**
@@ -1150,6 +1152,8 @@ namespace platf::dxgi {
     sampler_state_t sampler_linear;  ///< Linear sampler used when drawing window textures.
     buf_t window_rotation;  ///< Zero rotation constant buffer required by the window vertex shader.
     bool gpu_composition_ready {false};  ///< Whether the GPU composition resources were created successfully.
+    int last_window_w {0};  ///< Last observed anchor client-area width, used to detect window resizes.
+    int last_window_h {0};  ///< Last observed anchor client-area height, used to detect window resizes.
 
     /**
      * @brief Composite auxiliary windows on the GPU onto the capture texture.

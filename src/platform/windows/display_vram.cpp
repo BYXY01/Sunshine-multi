@@ -1940,6 +1940,15 @@ namespace platf::dxgi {
     window_set = std::make_unique<window_capture_set_t>(this, config, hwnd, aux_exclude);
     window_set->refresh();
 
+    // Record the anchor's current client-area size so snapshot() can detect a
+    // window resize and reinitialize the WGC capture even when the captured
+    // frame size does not follow the window (WGC frames can lag window sizes).
+    RECT client_rect {};
+    if (GetClientRect(hwnd, &client_rect)) {
+      last_window_w = client_rect.right - client_rect.left;
+      last_window_h = client_rect.bottom - client_rect.top;
+    }
+
     // Window capture has no rotation, so the pre-rotation dimensions match
     // the capture dimensions used by the VRAM image pool.
     width_before_rotation = width;
@@ -2031,8 +2040,24 @@ namespace platf::dxgi {
     D3D11_TEXTURE2D_DESC desc;
     src->GetDesc(&desc);
 
+    // Detect window resizes independently of the WGC frame size: WGC capture
+    // frames can lag (or never follow) the window's real size, so a resized
+    // window must force a reinit to recreate the capture at the new size.
+    RECT client_rect {};
+    if (GetClientRect(hwnd, &client_rect)) {
+      const int client_w = client_rect.right - client_rect.left;
+      const int client_h = client_rect.bottom - client_rect.top;
+      if (last_window_w != 0 && (client_w != last_window_w || client_h != last_window_h)) {
+        BOOST_LOG(info) << "Window capture window resized: client="sv << last_window_w << 'x' << last_window_h << " -> "sv << client_w << 'x' << client_h;
+        last_window_w = client_w;
+        last_window_h = client_h;
+        return capture_e::reinit;
+      }
+    }
+
     if (desc.Width != width_before_rotation || desc.Height != height_before_rotation) {
-      BOOST_LOG(info) << "Window capture size changed ["sv << width << 'x' << height << " -> "sv << desc.Width << 'x' << desc.Height << ']';
+      BOOST_LOG(info) << "Window capture size changed ["sv << width << 'x' << height << " -> "sv << desc.Width << 'x' << desc.Height
+                      << "] display="sv << this->width << 'x' << this->height << " before_rotation="sv << width_before_rotation << 'x' << height_before_rotation;
       return capture_e::reinit;
     }
     if (capture_format != desc.Format) {
