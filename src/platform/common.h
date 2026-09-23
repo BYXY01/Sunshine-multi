@@ -722,6 +722,18 @@ namespace platf {
     virtual std::shared_ptr<img_t> alloc_img() = 0;
 
     /**
+     * @brief Get the native window handle bound by a window-capture backend.
+     *
+     * Used to keep the captured window stable across reinitialization so a
+     * window resize does not re-select a different application.
+     *
+     * @return Native HWND value, or 0 for non-window backends.
+     */
+    virtual std::uintptr_t window_anchor_handle() const {
+      return 0;
+    }
+
+    /**
      * @brief Populate a fallback image when real capture data is unavailable.
      *
      * @param img Image or frame object to read from or populate.
@@ -919,7 +931,7 @@ namespace platf {
    * select the target group (empty selects the first configured window group).
    * @return The display_t instance based on hwdevice_type.
    */
-  std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config, const std::string_view &group_name = {}, const std::string_view &session_key = {});
+  std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config, const std::string_view &group_name = {}, const std::string_view &session_key = {}, std::uintptr_t preferred_hwnd = 0);
 
   // A list of names of displays accepted as display_name with the mem_type_e
   /**

@@ -49,17 +49,45 @@ namespace session_group {
   inline constexpr std::string_view CAPTURE_MONITOR = "monitor";  ///< Stock monitor capture backend.
 
   /**
+   * @brief A single session inside a group.
+   *
+   * A session is one independent stream frame: the set of windows it captures
+   * (main window plus its menus/dialogs) is composited, by real Z-order, into
+   * that session's own picture. The session identifier is the Moonlight
+   * `appid`, which is how a client selects which session (application) to
+   * stream.
+   */
+  struct session_config_t {
+    int id {0};  ///< Session identifier; equals the Moonlight `appid` used for routing.
+    std::string name;  ///< Human-readable session name (client-facing).
+    std::uintptr_t hwnd {0};  ///< Direct Win32 window handle; overrides all rules when non-zero.
+    std::vector<window_rule_t> rules;  ///< Window matching rules for this session (OR).
+    std::vector<std::string> aux_exclude;  ///< Auxiliary window classes filtered from this session's frame.
+
+    /**
+     * @brief Check whether the session carries no matching criteria.
+     *
+     * @return True when neither an explicit hwnd nor any rule is set.
+     */
+    [[nodiscard]] bool empty() const {
+      return hwnd == 0 && rules.empty();
+    }
+  };
+
+  /**
    * @brief A single declarative session group.
+   *
+   * A group is the isolation boundary (one capture thread, one port in
+   * `per-group-port` mode) and holds one or more sessions. Each session is an
+   * independent picture; the group-level fields apply to every session in it.
    */
   struct config_t {
     std::string name;  ///< Unique session group name.
     std::string capture {CAPTURE_WINDOW};  ///< Capture backend: `window` or `monitor`.
     std::uint16_t port {0};  ///< Moonlight TCP port used by this group.
-    std::uintptr_t hwnd {0};  ///< Direct Win32 window handle to capture; overrides all rules when non-zero.
-    std::vector<window_rule_t> rules;  ///< Window matching rules (OR).
-    std::vector<std::string> aux_exclude;  ///< Auxiliary window classes filtered from the frame.
     int max_fps {60};  ///< Maximum capture framerate.
     int bitrate_kbps {0};  ///< Stream bitrate in kbps; 0 leaves the client to decide.
+    std::vector<session_config_t> sessions;  ///< Sessions (applications) served by this group.
 
     /**
      * @brief Check whether this group uses the window compositing backend.
@@ -183,6 +211,18 @@ namespace session_group {
    * `config::parse`. Consumed by the capture orchestration layer.
    */
   extern groups_config_t active_groups;
+
+  /**
+   * @brief Seed the runtime group registry from parsed configuration.
+   *
+   * The configuration file is treated as a preset template: parsing yields a
+   * set of groups/sessions that are registered here through the same entry
+   * point the runtime control plane will use. The registry is the single source
+   * of truth for the capture and routing layers.
+   *
+   * @param groups Parsed configuration to register.
+   */
+  void seed_active_groups(groups_config_t groups);
 
   /**
    * @brief Runtime-mutable window capture state for a single streaming session.
@@ -349,32 +389,43 @@ namespace session_group {
   std::string resolve_launch_group(const std::string &requested);
 
   /**
-   * @brief Match a single top-level window against a group's rules.
+   * @brief Get the first session of a group, if any.
    *
-   * The window belongs to the group when any rule matches it (OR semantics).
+   * Placeholder used by the capture layer until session-id routing (R3) lands:
+   * the capture backend still resolves a single session per group.
+   *
+   * @param group Group to inspect.
+   * @return Pointer to the first session, or nullptr when the group has none.
+   */
+  const session_config_t *first_session(const config_t &group);
+
+  /**
+   * @brief Match a single top-level window against a session's rules.
+   *
+   * The window belongs to the session when any rule matches it (OR semantics).
    * A rule matches when the window handle equals the rule's hwnd, or the
    * process name matches `process`, or the window title matches `title`, or
    * the window class matches `class`. The `box` field is accepted for
    * configuration compatibility but is intentionally not evaluated here.
    *
-   * @param group Session group rules to test against.
+   * @param session Session rules to test against.
    * @param hwnd Window handle to evaluate.
-   * @return True when the window belongs to the group.
+   * @return True when the window belongs to the session.
    */
-  bool match_window(const config_t &group, std::uintptr_t hwnd);
+  bool match_window(const session_config_t &session, std::uintptr_t hwnd);
 
   /**
-   * @brief Find the best matching HWND for a window-capture group.
+   * @brief Find the best matching HWND for a session.
    *
-   * An explicit group-level or rule-level hwnd wins immediately. Otherwise
+   * An explicit session-level or rule-level hwnd wins immediately. Otherwise
    * visible top-level windows are enumerated: windows whose class appears in
    * `aux_exclude` are skipped, and among the remaining matches the window with
-   * the largest area (the main window) is returned. Returns 0 when the group
-   * is not a window group or no window matches.
+   * the largest area (the main window) is returned. Returns 0 when no window
+   * matches.
    *
-   * @param group Session group to resolve.
+   * @param session Session to resolve.
    * @return Matching HWND, or 0 when none matches.
    */
-  std::uintptr_t match_window_hwnd(const config_t &group);
+  std::uintptr_t match_window_hwnd(const session_config_t &session);
 
 }  // namespace session_group

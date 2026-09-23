@@ -96,18 +96,19 @@ namespace {
   };
 
   /**
-   * @brief Build a window-capture group with a single process rule matching
-   * the test executable.
+   * @brief Build a session with a single process rule matching the test
+   * executable.
    *
-   * @return Configured window group.
+   * @return Configured session.
    */
-  session_group::config_t process_group() {
-    session_group::config_t group;
-    group.capture = std::string {session_group::CAPTURE_WINDOW};
+  session_group::session_config_t process_session() {
+    session_group::session_config_t session;
+    session.id = 1;
+    session.name = "test";
     session_group::window_rule_t rule;
     rule.process = test_process_name();
-    group.rules.push_back(std::move(rule));
-    return group;
+    session.rules.push_back(std::move(rule));
+    return session;
   }
 
 }  // namespace
@@ -121,40 +122,37 @@ TEST(SessionGroupWindowMatcherTest, ChineseTitleRuleMatches) {
   TestWindow win {L"SunshineTestCJKWin", L"无标题 - Notepad", 400, 300};
   ASSERT_NE(win.hwnd(), nullptr);
 
-  session_group::config_t group;
-  group.capture = std::string {session_group::CAPTURE_WINDOW};
+  session_group::session_config_t session;
   session_group::window_rule_t rule;
   // "无标题" encoded as UTF-8.
   rule.title = "\xE6\x97\xA0\xE6\xA0\x87\xE9\xA2\x98";
-  group.rules.push_back(std::move(rule));
+  session.rules.push_back(std::move(rule));
 
-  EXPECT_TRUE(session_group::match_window(group, reinterpret_cast<std::uintptr_t>(win.hwnd())));
+  EXPECT_TRUE(session_group::match_window(session, reinterpret_cast<std::uintptr_t>(win.hwnd())));
 }
 
 TEST(SessionGroupWindowMatcherTest, AsciiTitleRuleIsCaseInsensitive) {
   TestWindow win {L"SunshineTestAsciiWin", L"My Game 1.0", 400, 300};
   ASSERT_NE(win.hwnd(), nullptr);
 
-  session_group::config_t group;
-  group.capture = std::string {session_group::CAPTURE_WINDOW};
+  session_group::session_config_t session;
   session_group::window_rule_t rule;
   rule.title = "my game 1.0";
-  group.rules.push_back(std::move(rule));
+  session.rules.push_back(std::move(rule));
 
-  EXPECT_TRUE(session_group::match_window(group, reinterpret_cast<std::uintptr_t>(win.hwnd())));
+  EXPECT_TRUE(session_group::match_window(session, reinterpret_cast<std::uintptr_t>(win.hwnd())));
 }
 
 TEST(SessionGroupWindowMatcherTest, ClassRuleMatches) {
   TestWindow win {L"SunshineTestClassWin", L"classy", 400, 300};
   ASSERT_NE(win.hwnd(), nullptr);
 
-  session_group::config_t group;
-  group.capture = std::string {session_group::CAPTURE_WINDOW};
+  session_group::session_config_t session;
   session_group::window_rule_t rule;
   rule.window_class = "sunshinetestclasswin";
-  group.rules.push_back(std::move(rule));
+  session.rules.push_back(std::move(rule));
 
-  EXPECT_TRUE(session_group::match_window(group, reinterpret_cast<std::uintptr_t>(win.hwnd())));
+  EXPECT_TRUE(session_group::match_window(session, reinterpret_cast<std::uintptr_t>(win.hwnd())));
 }
 
 TEST(SessionGroupWindowMatcherTest, MatchWindowHwndPrefersLargestWindow) {
@@ -165,7 +163,7 @@ TEST(SessionGroupWindowMatcherTest, MatchWindowHwndPrefersLargestWindow) {
   ASSERT_NE(small.hwnd(), nullptr);
   ASSERT_NE(large.hwnd(), nullptr);
 
-  EXPECT_EQ(session_group::match_window_hwnd(process_group()), reinterpret_cast<std::uintptr_t>(large.hwnd()));
+  EXPECT_EQ(session_group::match_window_hwnd(process_session()), reinterpret_cast<std::uintptr_t>(large.hwnd()));
 }
 
 TEST(SessionGroupWindowMatcherTest, MatchWindowHwndSkipsAuxExcludedWindows) {
@@ -174,9 +172,9 @@ TEST(SessionGroupWindowMatcherTest, MatchWindowHwndSkipsAuxExcludedWindows) {
   ASSERT_NE(main.hwnd(), nullptr);
   ASSERT_NE(popup.hwnd(), nullptr);
 
-  auto group = process_group();
-  group.aux_exclude.emplace_back("SunshineTestPopupWin");  // mixed case is normalized
-  EXPECT_EQ(session_group::match_window_hwnd(group), reinterpret_cast<std::uintptr_t>(main.hwnd()));
+  auto session = process_session();
+  session.aux_exclude.emplace_back("SunshineTestPopupWin");  // mixed case is normalized
+  EXPECT_EQ(session_group::match_window_hwnd(session), reinterpret_cast<std::uintptr_t>(main.hwnd()));
 }
 
 TEST(SessionGroupWindowMatcherTest, MatchWindowHwndReturnsZeroWhenAllExcluded) {
@@ -185,22 +183,21 @@ TEST(SessionGroupWindowMatcherTest, MatchWindowHwndReturnsZeroWhenAllExcluded) {
   ASSERT_NE(main.hwnd(), nullptr);
   ASSERT_NE(popup.hwnd(), nullptr);
 
-  auto group = process_group();
-  group.aux_exclude.emplace_back("sunshinetestmainwin");
-  group.aux_exclude.emplace_back("SunshineTestPopupWin");
-  EXPECT_EQ(session_group::match_window_hwnd(group), 0);
+  auto session = process_session();
+  session.aux_exclude.emplace_back("sunshinetestmainwin");
+  session.aux_exclude.emplace_back("SunshineTestPopupWin");
+  EXPECT_EQ(session_group::match_window_hwnd(session), 0);
 }
 
 #else  // _WIN32
 
 TEST(SessionGroupWindowMatcherTest, MatchWindowIsFalseOnNonWindows) {
-  session_group::config_t group;
-  group.capture = std::string {session_group::CAPTURE_WINDOW};
+  session_group::session_config_t session;
   session_group::window_rule_t rule;
   rule.title = "anything";
-  group.rules.push_back(std::move(rule));
+  session.rules.push_back(std::move(rule));
 
-  EXPECT_FALSE(session_group::match_window(group, 0x1234));
+  EXPECT_FALSE(session_group::match_window(session, 0x1234));
 }
 
 #endif  // _WIN32

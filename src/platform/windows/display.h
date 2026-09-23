@@ -1131,6 +1131,15 @@ namespace platf::dxgi {
       std::memset(&metadata, 0, sizeof(metadata));
       return false;
     }
+
+    /**
+     * @brief Get the bound anchor window handle.
+     *
+     * @return Anchor HWND as an integer.
+     */
+    std::uintptr_t window_anchor_handle() const override {
+      return reinterpret_cast<std::uintptr_t>(hwnd);
+    }
   };
 
   /**
@@ -1236,6 +1245,15 @@ namespace platf::dxgi {
     bool get_hdr_metadata(SS_HDR_METADATA &metadata) override {
       std::memset(&metadata, 0, sizeof(metadata));
       return false;
+    }
+
+    /**
+     * @brief Get the bound anchor window handle.
+     *
+     * @return Anchor HWND as an integer.
+     */
+    std::uintptr_t window_anchor_handle() const override {
+      return reinterpret_cast<std::uintptr_t>(hwnd);
     }
   };
 }  // namespace platf::dxgi

@@ -23,11 +23,13 @@ LizardByte has the full documentation hosted on [Read the Docs](https://docs.liz
 
 ## 🚀 Multi-session Window Capture (fork additions)
 
-This fork extends Sunshine with generic **multi-session window capture**:
-one or more *session groups* group windows together, and each group is
-streamed over its own RTSP port / Moonlight session with its own capture
-thread, so different applications (or the same application for different
-users) can be captured and streamed independently and in parallel.
+This fork extends Sunshine with generic **multi-session window capture**. A
+*session group* is the isolation boundary (one capture thread, and one RTSP
+port in `per-group-port` mode) and holds one or more **sessions**. A *session*
+is one independent stream picture: the set of windows it matches (the main
+window plus its menus/dialogs) is composited, by real Z-order, into that
+session's own frame. The session id is the Moonlight `appid`, which is how a
+client selects which application to stream.
 
 Feature additions (step by step):
 
@@ -37,11 +39,18 @@ Feature additions (step by step):
 | 6.4-2 | **Port modes** — `single-port` (all groups share RTSP port 47989, routed by group name) or `per-group-port` (one dedicated RTSP port per group, allocated from a `port_range`), plus a configurable default group. |
 | 6.4-3 | **Popup composition** — the backend binds to the process owning the matched window and composites all its visible top-level windows (menus, dialogs, tooltips) into one frame, so the full application appears in the stream. |
 | 6.4-4 | **GPU popup composition** — the GPU-backed (hardware) window backend composites popups on the GPU, drawing them onto the capture texture after the anchor frame (no CPU round trip); falls back to CPU composition if GPU composition fails. |
+| 6.4r-1 | **Session model rework** — a group now holds `sessions[]`, each session carrying its own window matching rules and `aux_exclude` list. This is the first step of the rework that replaces the per-group "matched process" capture with per-session window-set composition and session-id (`appid`) routing. |
+
+> The `6.4-1` … `6.4-4` rows predate the session model rework: their per-group
+> single-process ("anchor") semantics are being replaced by per-session
+> window-set composition. Until the routing and capture steps of the rework
+> land, the capture backend resolves the group's first session as a placeholder.
 
 Session groups are configured with a JSON file (`session-groups.json`) or
 command-line options (`--port-mode`, `--port-range`, `--default-group`,
-`--group`, `--process`, `--title`, `--class`, ...). The command line
-overrides the file.
+`--group`, `--process`, `--title`, `--class`, ...). The command line overrides
+the file. The configuration is only a **preset template**: groups and sessions
+can also be created and changed at runtime through the control channel.
 
 For the full configuration reference, see
 [docs/session_groups.md](docs/session_groups.md).

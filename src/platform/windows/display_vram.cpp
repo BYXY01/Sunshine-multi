@@ -4,6 +4,11 @@
  */
 // standard includes
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <string>
 
 // platform includes
 #include <d3dcompiler.h>
@@ -1961,6 +1966,7 @@ namespace platf::dxgi {
   void display_window_vram_t::composite_gpu(img_d3d_t *d3d_img, ID3D11Texture2D *src) {
     // The anchor frame becomes the background of the capture texture.
     device_ctx->CopyResource(d3d_img->capture_texture.get(), src);
+
     window_set->composite_gpu(d3d_img->capture_rt.get(), width_before_rotation, height_before_rotation, window_vs, window_ps, blend_alpha, sampler_linear);
   }
 
@@ -2017,6 +2023,209 @@ namespace platf::dxgi {
     return 0;
   }
 
+  namespace {
+    /**
+     * @brief Persistent state for the optional raw-frame debug dump.
+     *
+     * The dump is enabled only when the `SUNSHINE_DEBUG_DUMP_DIR` environment
+     * variable names a directory. `SUNSHINE_DEBUG_DUMP_COUNT` overrides how many
+     * of the most recent frames are kept on disk (default 30),
+     * `SUNSHINE_DEBUG_DUMP_SCALE` overrides the integer downscale factor
+     * (default 2), and `SUNSHINE_DEBUG_DUMP_EVERY` overrides how many captured
+     * frames are skipped between dumps (default 1). Keeping a rolling set of the
+     * most recent frames lets a transient capture corruption -- one that clears
+     * as soon as the pointer moves -- be inspected without any runtime trigger.
+     */
+    struct debug_frame_dump_t {
+      bool enabled {false};  ///< Whether dumping is active.
+      std::string dir;  ///< Destination directory for dumped frames.
+      int keep {30};  ///< Number of most-recent frames kept on disk.
+      int scale {2};  ///< Integer downscale factor applied to each dumped frame.
+      int every {1};  ///< Number of captured frames skipped between dumps.
+      std::uint64_t seen {0};  ///< Number of captured frames observed so far.
+      std::uint64_t seq {0};  ///< Sequence number of the next frame to dump.
+      texture2d_t staging;  ///< Staging texture reused for GPU readback.
+      D3D11_TEXTURE2D_DESC staging_desc {};  ///< Descriptor of the staging texture.
+    };
+
+    /**
+     * @brief Build the debug dump state from the environment.
+     *
+     * @return Populated dump state; dumping stays disabled when the directory
+     *         environment variable is unset.
+     */
+    debug_frame_dump_t make_debug_frame_dump() {
+      debug_frame_dump_t state;
+      const char *dir = std::getenv("SUNSHINE_DEBUG_DUMP_DIR");
+      if (dir == nullptr || *dir == '\0') {
+        return state;
+      }
+      state.dir = dir;
+      state.enabled = true;
+      if (const char *count = std::getenv("SUNSHINE_DEBUG_DUMP_COUNT")) {
+        const int value = std::atoi(count);
+        if (value > 0) {
+          state.keep = value;
+        }
+      }
+      if (const char *scale = std::getenv("SUNSHINE_DEBUG_DUMP_SCALE")) {
+        const int value = std::atoi(scale);
+        if (value >= 1 && value <= 8) {
+          state.scale = value;
+        }
+      }
+      if (const char *every = std::getenv("SUNSHINE_DEBUG_DUMP_EVERY")) {
+        const int value = std::atoi(every);
+        if (value >= 1) {
+          state.every = value;
+        }
+      }
+      std::error_code ec;
+      std::filesystem::create_directories(state.dir, ec);
+      BOOST_LOG(info) << "Window capture: raw frame dump enabled -> "sv << state.dir
+                      << " (keep="sv << state.keep << ", scale="sv << state.scale << ", every="sv << state.every << ')';
+      return state;
+    }
+
+    /**
+     * @brief Write one frame to a 32-bit bottom-up BMP file.
+     *
+     * @param path Destination file path.
+     * @param data Mapped source pixels.
+     * @param row_pitch Source row pitch in bytes.
+     * @param width Source width in pixels.
+     * @param height Source height in pixels.
+     * @param scale Integer downscale factor.
+     * @param bgra True when the source is already in BGRA byte order.
+     * @return True when the file was written successfully.
+     */
+    bool write_debug_bmp(const std::filesystem::path &path, const std::uint8_t *data, std::size_t row_pitch, int width, int height, int scale, bool bgra) {
+      const int out_w = width / scale;
+      const int out_h = height / scale;
+      if (data == nullptr || out_w <= 0 || out_h <= 0) {
+        return false;
+      }
+
+      const std::uint32_t pixel_bytes = 4;
+      const std::uint32_t row_bytes = static_cast<std::uint32_t>(out_w) * pixel_bytes;
+      const std::uint32_t image_bytes = row_bytes * static_cast<std::uint32_t>(out_h);
+      const std::uint32_t file_bytes = 14 + 40 + image_bytes;
+
+      std::ofstream file(path, std::ios::binary);
+      if (!file) {
+        return false;
+      }
+
+      auto put16 = [&file](std::uint16_t value) {
+        file.put(static_cast<char>(value & 0xFF));
+        file.put(static_cast<char>((value >> 8) & 0xFF));
+      };
+      auto put32 = [&file](std::uint32_t value) {
+        file.put(static_cast<char>(value & 0xFF));
+        file.put(static_cast<char>((value >> 8) & 0xFF));
+        file.put(static_cast<char>((value >> 16) & 0xFF));
+        file.put(static_cast<char>((value >> 24) & 0xFF));
+      };
+
+      // BITMAPFILEHEADER (14 bytes).
+      file.put('B');
+      file.put('M');
+      put32(file_bytes);
+      put16(0);
+      put16(0);
+      put32(14 + 40);
+
+      // BITMAPINFOHEADER (40 bytes).
+      put32(40);
+      put32(static_cast<std::uint32_t>(out_w));
+      put32(static_cast<std::uint32_t>(out_h));
+      put16(1);
+      put16(32);
+      put32(0);  // BI_RGB
+      put32(image_bytes);
+      put32(2835);
+      put32(2835);
+      put32(0);
+      put32(0);
+
+      std::string row(row_bytes, '\0');
+      for (int out_y = 0; out_y < out_h; ++out_y) {
+        const std::uint8_t *src_row = data + static_cast<std::size_t>((out_h - 1 - out_y) * scale) * row_pitch;
+        for (int out_x = 0; out_x < out_w; ++out_x) {
+          const std::uint8_t *src = src_row + static_cast<std::size_t>(out_x) * static_cast<std::size_t>(scale) * pixel_bytes;
+          char *dst = row.data() + static_cast<std::size_t>(out_x) * pixel_bytes;
+          dst[0] = static_cast<char>(bgra ? src[0] : src[2]);
+          dst[1] = static_cast<char>(src[1]);
+          dst[2] = static_cast<char>(bgra ? src[2] : src[0]);
+          dst[3] = static_cast<char>(src[3]);
+        }
+        file.write(row.data(), static_cast<std::streamsize>(row.size()));
+      }
+      return static_cast<bool>(file);
+    }
+
+    /**
+     * @brief Dump the raw capture frame when the debug dump is enabled.
+     *
+     * @param device D3D device used to create the readback staging texture.
+     * @param ctx Immediate context used for the copy and map.
+     * @param src Raw capture texture to dump.
+     */
+    void debug_dump_capture_frame(device_t::pointer device, device_ctx_t &ctx, ID3D11Texture2D *src) {
+      static debug_frame_dump_t state = make_debug_frame_dump();
+      static std::mutex dump_mutex;
+      if (!state.enabled || src == nullptr) {
+        return;
+      }
+
+      std::lock_guard<std::mutex> lock(dump_mutex);
+      if (state.seen++ % static_cast<std::uint64_t>(state.every) != 0) {
+        return;
+      }
+
+      D3D11_TEXTURE2D_DESC desc;
+      src->GetDesc(&desc);
+
+      if (!state.staging || state.staging_desc.Width != desc.Width || state.staging_desc.Height != desc.Height || state.staging_desc.Format != desc.Format) {
+        D3D11_TEXTURE2D_DESC staging_desc {};
+        staging_desc.Width = desc.Width;
+        staging_desc.Height = desc.Height;
+        staging_desc.MipLevels = 1;
+        staging_desc.ArraySize = 1;
+        staging_desc.SampleDesc.Count = 1;
+        staging_desc.Usage = D3D11_USAGE_STAGING;
+        staging_desc.Format = desc.Format;
+        staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        state.staging.reset();
+        if (FAILED(device->CreateTexture2D(&staging_desc, nullptr, &state.staging))) {
+          BOOST_LOG(warning) << "Window capture: failed to create frame dump staging texture"sv;
+          return;
+        }
+        state.staging_desc = staging_desc;
+      }
+
+      ctx->CopyResource(state.staging.get(), src);
+
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      if (FAILED(ctx->Map(state.staging.get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+        return;
+      }
+      auto unmap = util::fail_guard([&]() {
+        ctx->Unmap(state.staging.get(), 0);
+      });
+
+      const bool bgra = desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM || desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+
+      if (state.seq >= static_cast<std::uint64_t>(state.keep)) {
+        std::error_code ec;
+        std::filesystem::remove(std::filesystem::path(state.dir) / ("frame_" + std::to_string(state.seq - static_cast<std::uint64_t>(state.keep)) + ".bmp"), ec);
+      }
+      auto path = std::filesystem::path(state.dir) / ("frame_" + std::to_string(state.seq) + ".bmp");
+      write_debug_bmp(path, static_cast<const std::uint8_t *>(mapped.pData), mapped.RowPitch, static_cast<int>(desc.Width), static_cast<int>(desc.Height), state.scale, bgra);
+      ++state.seq;
+    }
+  }  // namespace
+
   capture_e display_window_vram_t::snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) {
     // If the captured window has been destroyed, stop the session.
     if (!IsWindow(hwnd)) {
@@ -2064,6 +2273,8 @@ namespace platf::dxgi {
       BOOST_LOG(info) << "Window capture format changed ["sv << dxgi_format_to_string(capture_format) << " -> "sv << dxgi_format_to_string(desc.Format) << ']';
       return capture_e::reinit;
     }
+
+    debug_dump_capture_frame(device.get(), device_ctx, src.get());
 
     std::shared_ptr<platf::img_t> img;
     if (!pull_free_image_cb(img)) {

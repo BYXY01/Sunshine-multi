@@ -2076,7 +2076,7 @@ namespace config {
         }
         return -1;
       }
-      session_group::active_groups = std::move(*session_groups);
+      session_group::seed_active_groups(std::move(*session_groups));
       if (!session_group::active_groups.groups.empty()) {
         BOOST_LOG(info) << "Loaded "sv << session_group::active_groups.groups.size() << " session group(s)"sv;
         // A window capture session group implicitly selects the window capture backend.

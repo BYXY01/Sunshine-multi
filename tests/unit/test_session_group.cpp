@@ -7,6 +7,7 @@
 #include "../tests_common.h"
 
 // standard includes
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -27,6 +28,9 @@ namespace {
     /**
      * @brief Get a valid two-group JSON document for parsing tests.
      *
+     * Each group holds one or more sessions, and every session carries its own
+     * window matching rules and auxiliary exclusion list.
+     *
      * @return Valid session groups JSON text.
      */
     std::string_view valid_groups_json() const {
@@ -38,20 +42,26 @@ namespace {
             "name": "user1-notepad",
             "capture": "window",
             "port": 48100,
-            "rules": [
-              {"box": "cap_u1_notepad"},
-              {"process": "notepad.exe"}
-            ],
-            "aux_exclude": ["tooltips_class32", "IME"],
             "max_fps": 60,
-            "bitrate_kbps": 20000
+            "bitrate_kbps": 20000,
+            "sessions": [
+              {
+                "id": 1,
+                "name": "notepad",
+                "rules": [
+                  {"box": "cap_u1_notepad"},
+                  {"process": "notepad.exe"}
+                ],
+                "aux_exclude": ["tooltips_class32", "IME"]
+              }
+            ]
           },
           {
             "name": "user2-chrome",
             "capture": "window",
             "port": 48101,
-            "rules": [
-              {"process": "chrome.exe"}
+            "sessions": [
+              {"id": 2, "name": "chrome", "rules": [{"process": "chrome.exe"}]}
             ]
           }
         ]
@@ -72,18 +82,22 @@ TEST_F(SessionGroupTest, ParsesValidGroupConfiguration) {
   EXPECT_EQ(first.name, "user1-notepad");
   EXPECT_EQ(first.capture, session_group::CAPTURE_WINDOW);
   EXPECT_EQ(first.port, 48100);
-  EXPECT_EQ(first.rules.size(), 2);
-  EXPECT_EQ(first.rules[0].box, "cap_u1_notepad");
-  EXPECT_EQ(first.rules[1].process, "notepad.exe");
-  ASSERT_EQ(first.aux_exclude.size(), 2);
-  EXPECT_EQ(first.aux_exclude[0], "tooltips_class32");
   EXPECT_EQ(first.max_fps, 60);
   EXPECT_EQ(first.bitrate_kbps, 20000);
+  ASSERT_EQ(first.sessions.size(), 1);
+  EXPECT_EQ(first.sessions[0].id, 1);
+  EXPECT_EQ(first.sessions[0].name, "notepad");
+  ASSERT_EQ(first.sessions[0].rules.size(), 2);
+  EXPECT_EQ(first.sessions[0].rules[0].box, "cap_u1_notepad");
+  EXPECT_EQ(first.sessions[0].rules[1].process, "notepad.exe");
+  ASSERT_EQ(first.sessions[0].aux_exclude.size(), 2);
+  EXPECT_EQ(first.sessions[0].aux_exclude[0], "tooltips_class32");
 
   const auto &second = groups->groups[1];
   EXPECT_EQ(second.name, "user2-chrome");
   EXPECT_EQ(second.port, 48101);
-  EXPECT_EQ(second.rules.size(), 1);
+  ASSERT_EQ(second.sessions.size(), 1);
+  EXPECT_EQ(second.sessions[0].rules.size(), 1);
 }
 
 TEST(SessionGroupParseHwndTest, ParsesDecimalAndHexadecimalHandles) {
@@ -95,15 +109,17 @@ TEST(SessionGroupParseHwndTest, ParsesDecimalAndHexadecimalHandles) {
   EXPECT_EQ(session_group::parse_hwnd("1234junk"), 0);
 }
 
-TEST_F(SessionGroupTest, ParsesGroupLevelHwnd) {
+TEST_F(SessionGroupTest, ParsesSessionLevelHwnd) {
   auto groups = session_group::parse_groups(R"({
     "session_groups": [
-      {"name": "hwnd-group", "capture": "window", "port": 48010, "hwnd": "0x4D2"}
+      {"name": "hwnd-group", "capture": "window", "port": 48010,
+       "sessions": [{"id": 1, "name": "win", "hwnd": "0x4D2"}]}
     ]
   })"sv);
   ASSERT_TRUE(groups.has_value());
   ASSERT_EQ(groups->groups.size(), 1);
-  EXPECT_EQ(groups->groups[0].hwnd, 0x4D2);
+  ASSERT_EQ(groups->groups[0].sessions.size(), 1);
+  EXPECT_EQ(groups->groups[0].sessions[0].hwnd, 0x4D2);
   EXPECT_TRUE(groups->groups[0].is_window_capture());
 }
 
@@ -111,14 +127,16 @@ TEST_F(SessionGroupTest, ParsesHwndRule) {
   auto groups = session_group::parse_groups(R"({
     "session_groups": [
       {"name": "hwnd-rule", "capture": "window", "port": 48010,
-       "rules": [{"hwnd": "9999"}, {"process": "fallback.exe"}]}
+       "sessions": [{"id": 1, "name": "win",
+         "rules": [{"hwnd": "9999"}, {"process": "fallback.exe"}]}]}
     ]
   })"sv);
   ASSERT_TRUE(groups.has_value());
   ASSERT_EQ(groups->groups.size(), 1);
-  ASSERT_EQ(groups->groups[0].rules.size(), 2);
-  EXPECT_EQ(groups->groups[0].rules[0].hwnd, 9999);
-  EXPECT_EQ(groups->groups[0].rules[1].process, "fallback.exe");
+  ASSERT_EQ(groups->groups[0].sessions.size(), 1);
+  ASSERT_EQ(groups->groups[0].sessions[0].rules.size(), 2);
+  EXPECT_EQ(groups->groups[0].sessions[0].rules[0].hwnd, 9999);
+  EXPECT_EQ(groups->groups[0].sessions[0].rules[1].process, "fallback.exe");
 }
 
 TEST(SessionGroupHwndRuleTest, HwndRuleIsNotEmpty) {
@@ -155,8 +173,7 @@ TEST_F(SessionGroupTest, AppliesDefaultsForMissingFields) {
   EXPECT_EQ(group.capture, session_group::CAPTURE_WINDOW);
   EXPECT_EQ(group.max_fps, 60);
   EXPECT_EQ(group.bitrate_kbps, 0);
-  EXPECT_TRUE(group.rules.empty());
-  EXPECT_TRUE(group.aux_exclude.empty());
+  EXPECT_TRUE(group.sessions.empty());
 }
 
 TEST_F(SessionGroupTest, SkipsEmptyRules) {
@@ -165,17 +182,20 @@ TEST_F(SessionGroupTest, SkipsEmptyRules) {
       {
         "name": "empty-rule",
         "port": 48010,
-        "rules": [
-          {"box": "", "process": "", "title": "", "class": ""},
-          {"box": "cap_box"}
+        "sessions": [
+          {"id": 1, "name": "s", "rules": [
+            {"box": "", "process": "", "title": "", "class": ""},
+            {"box": "cap_box"}
+          ]}
         ]
       }
     ]
   })"sv);
   ASSERT_TRUE(groups.has_value());
   ASSERT_EQ(groups->groups.size(), 1);
-  EXPECT_EQ(groups->groups[0].rules.size(), 1);
-  EXPECT_EQ(groups->groups[0].rules[0].box, "cap_box");
+  ASSERT_EQ(groups->groups[0].sessions.size(), 1);
+  EXPECT_EQ(groups->groups[0].sessions[0].rules.size(), 1);
+  EXPECT_EQ(groups->groups[0].sessions[0].rules[0].box, "cap_box");
 }
 
 TEST_F(SessionGroupTest, ValidatesUniqueNames) {
@@ -193,23 +213,39 @@ TEST_F(SessionGroupTest, ValidatesUniqueNames) {
   EXPECT_NE(std::find(errors.begin(), errors.end(), "duplicate session group name: dup"), errors.end());
 }
 
-TEST_F(SessionGroupTest, ValidatesWindowGroupRequiresRulesOrHwnd) {
+TEST_F(SessionGroupTest, ValidatesWindowGroupRequiresSession) {
   auto groups = session_group::parse_groups(R"({
     "port_mode": "single-port",
     "session_groups": [
-      {"name": "no-rules", "capture": "window"}
+      {"name": "no-sessions", "capture": "window"}
     ]
   })"sv);
   ASSERT_TRUE(groups.has_value());
 
   auto errors = session_group::validate_groups(*groups);
   ASSERT_EQ(errors.size(), 1);
-  EXPECT_EQ(errors[0], "window capture group 'no-rules' must define at least one matching rule or a group-level hwnd");
+  EXPECT_EQ(errors[0], "window capture group 'no-sessions' must define at least one session");
+}
+
+TEST_F(SessionGroupTest, ValidatesSessionRequiresRulesOrHwnd) {
+  auto groups = session_group::parse_groups(R"({
+    "port_mode": "single-port",
+    "session_groups": [
+      {"name": "no-rules", "capture": "window",
+       "sessions": [{"id": 1, "name": "empty"}]}
+    ]
+  })"sv);
+  ASSERT_TRUE(groups.has_value());
+
+  auto errors = session_group::validate_groups(*groups);
+  ASSERT_EQ(errors.size(), 1);
+  EXPECT_EQ(errors[0], "window capture session 'empty' in group 'no-rules' must define at least one matching rule or an hwnd");
 
   auto with_hwnd = session_group::parse_groups(R"({
     "port_mode": "single-port",
     "session_groups": [
-      {"name": "hwnd-ok", "capture": "window", "hwnd": "0x4D2"}
+      {"name": "hwnd-ok", "capture": "window",
+       "sessions": [{"id": 1, "name": "win", "hwnd": "0x4D2"}]}
     ]
   })"sv);
   ASSERT_TRUE(with_hwnd.has_value());
@@ -218,18 +254,39 @@ TEST_F(SessionGroupTest, ValidatesWindowGroupRequiresRulesOrHwnd) {
   auto with_rule = session_group::parse_groups(R"({
     "port_mode": "single-port",
     "session_groups": [
-      {"name": "rule-ok", "capture": "window", "rules": [{"process": "x.exe"}]}
+      {"name": "rule-ok", "capture": "window",
+       "sessions": [{"id": 1, "name": "win", "rules": [{"process": "x.exe"}]}]}
     ]
   })"sv);
   ASSERT_TRUE(with_rule.has_value());
   EXPECT_TRUE(session_group::validate_groups(*with_rule).empty());
 }
 
+TEST_F(SessionGroupTest, ValidatesSessionIdsAndNames) {
+  auto groups = session_group::parse_groups(R"({
+    "port_mode": "single-port",
+    "session_groups": [
+      {"name": "g", "capture": "window", "sessions": [
+        {"id": 0, "name": "a", "rules": [{"process": "a.exe"}]},
+        {"id": 1, "name": "b", "rules": [{"process": "b.exe"}]},
+        {"id": 1, "name": "b", "rules": [{"process": "c.exe"}]}
+      ]}
+    ]
+  })"sv);
+  ASSERT_TRUE(groups.has_value());
+
+  auto errors = session_group::validate_groups(*groups);
+  EXPECT_NE(std::find(errors.begin(), errors.end(), "session in group 'g' must have a non-zero id (the Moonlight appid)"), errors.end());
+  EXPECT_NE(std::find(errors.begin(), errors.end(), "duplicate session id 1 in group 'g'"), errors.end());
+  EXPECT_NE(std::find(errors.begin(), errors.end(), "duplicate session name 'b' in group 'g'"), errors.end());
+}
+
 TEST_F(SessionGroupTest, ValidatesInvalidCaptureBackend) {
   auto groups = session_group::parse_groups(R"({
     "port_mode": "single-port",
     "session_groups": [
-      {"name": "bad-capture", "capture": "hologram", "rules": [{"process": "x.exe"}]}
+      {"name": "bad-capture", "capture": "hologram",
+       "sessions": [{"id": 1, "name": "s", "rules": [{"process": "x.exe"}]}]}
     ]
   })"sv);
   ASSERT_TRUE(groups.has_value());
@@ -242,7 +299,8 @@ TEST_F(SessionGroupTest, ValidatesInvalidCaptureBackend) {
 TEST_F(SessionGroupTest, ValidationRequiresExplicitPortMode) {
   auto groups = session_group::parse_groups(R"({
     "session_groups": [
-      {"name": "no-mode", "capture": "window", "rules": [{"process": "x.exe"}]}
+      {"name": "no-mode", "capture": "window",
+       "sessions": [{"id": 1, "name": "s", "rules": [{"process": "x.exe"}]}]}
     ]
   })"sv);
   ASSERT_TRUE(groups.has_value());
@@ -256,7 +314,8 @@ TEST_F(SessionGroupTest, ValidationRejectsUnknownPortMode) {
   auto groups = session_group::parse_groups(R"({
     "port_mode": "hybrid",
     "session_groups": [
-      {"name": "bad-mode", "capture": "window", "rules": [{"process": "x.exe"}]}
+      {"name": "bad-mode", "capture": "window",
+       "sessions": [{"id": 1, "name": "s", "rules": [{"process": "x.exe"}]}]}
     ]
   })"sv);
   ASSERT_TRUE(groups.has_value());
@@ -270,7 +329,8 @@ TEST_F(SessionGroupTest, PerGroupPortRequiresPortRange) {
   auto groups = session_group::parse_groups(R"({
     "port_mode": "per-group-port",
     "session_groups": [
-      {"name": "no-range", "capture": "window", "rules": [{"process": "x.exe"}]}
+      {"name": "no-range", "capture": "window",
+       "sessions": [{"id": 1, "name": "s", "rules": [{"process": "x.exe"}]}]}
     ]
   })"sv);
   ASSERT_TRUE(groups.has_value());
@@ -285,7 +345,8 @@ TEST_F(SessionGroupTest, PerGroupPortRejectsMalformedRange) {
     "port_mode": "per-group-port",
     "port_range": "48010",
     "session_groups": [
-      {"name": "bad-range", "capture": "window", "rules": [{"process": "x.exe"}]}
+      {"name": "bad-range", "capture": "window",
+       "sessions": [{"id": 1, "name": "s", "rules": [{"process": "x.exe"}]}]}
     ]
   })"sv);
   ASSERT_TRUE(groups.has_value());
@@ -300,9 +361,9 @@ TEST_F(SessionGroupTest, PerGroupPortRejectsTooManyGroups) {
     "port_mode": "per-group-port",
     "port_range": "48010-48011",
     "session_groups": [
-      {"name": "a", "capture": "window", "rules": [{"process": "a.exe"}]},
-      {"name": "b", "capture": "window", "rules": [{"process": "b.exe"}]},
-      {"name": "c", "capture": "window", "rules": [{"process": "c.exe"}]}
+      {"name": "a", "capture": "window", "sessions": [{"id": 1, "name": "s", "rules": [{"process": "a.exe"}]}]},
+      {"name": "b", "capture": "window", "sessions": [{"id": 2, "name": "s", "rules": [{"process": "b.exe"}]}]},
+      {"name": "c", "capture": "window", "sessions": [{"id": 3, "name": "s", "rules": [{"process": "c.exe"}]}]}
     ]
   })"sv);
   ASSERT_TRUE(groups.has_value());
@@ -316,7 +377,7 @@ TEST_F(SessionGroupTest, PerGroupPortRejectsReservedServicePorts) {
   for (const auto &range : {"48010-48020"sv, "47984-47985"sv, "47989-47990"sv, "47990-47999"sv}) {
     auto groups = session_group::parse_groups(std::string {
       R"({"port_mode": "per-group-port", "port_range": ")" + std::string {range} + R"(", "session_groups": [
-        {"name": "a", "capture": "window", "rules": [{"process": "a.exe"}]}
+        {"name": "a", "capture": "window", "sessions": [{"id": 1, "name": "s", "rules": [{"process": "a.exe"}]}]}
       ]})"
     });
     ASSERT_TRUE(groups.has_value());
@@ -332,7 +393,8 @@ TEST_F(SessionGroupTest, ParsesDefaultGroup) {
     "port_mode": "single-port",
     "default_group": "user1-notepad",
     "session_groups": [
-      {"name": "user1-notepad", "capture": "window", "rules": [{"process": "notepad.exe"}]}
+      {"name": "user1-notepad", "capture": "window",
+       "sessions": [{"id": 1, "name": "s", "rules": [{"process": "notepad.exe"}]}]}
     ]
   })"sv);
   ASSERT_TRUE(groups.has_value());
@@ -345,7 +407,8 @@ TEST_F(SessionGroupTest, ValidationRejectsUnknownDefaultGroup) {
     "port_mode": "single-port",
     "default_group": "ghost",
     "session_groups": [
-      {"name": "real", "capture": "window", "rules": [{"process": "x.exe"}]}
+      {"name": "real", "capture": "window",
+       "sessions": [{"id": 1, "name": "s", "rules": [{"process": "x.exe"}]}]}
     ]
   })"sv);
   ASSERT_TRUE(groups.has_value());
@@ -437,8 +500,10 @@ TEST(SessionGroupCliTest, BuildsSingleGroupFromOptions) {
   EXPECT_EQ(group.name, "user1-notepad");
   EXPECT_EQ(group.capture, "window");
   EXPECT_EQ(group.port, 48010);
-  ASSERT_EQ(group.rules.size(), 1);
-  EXPECT_EQ(group.rules[0].box, "cap_u1_notepad");
+  ASSERT_EQ(group.sessions.size(), 1);
+  EXPECT_EQ(group.sessions[0].id, 1);
+  ASSERT_EQ(group.sessions[0].rules.size(), 1);
+  EXPECT_EQ(group.sessions[0].rules[0].box, "cap_u1_notepad");
 }
 
 TEST(SessionGroupCliTest, BuildsGroupWithHwnd) {
@@ -453,9 +518,10 @@ TEST(SessionGroupCliTest, BuildsGroupWithHwnd) {
 
   const auto &group = groups->groups[0];
   EXPECT_EQ(group.name, "hwnd-group");
-  EXPECT_EQ(group.hwnd, 0x4D2);
-  ASSERT_EQ(group.rules.size(), 1);
-  EXPECT_EQ(group.rules[0].hwnd, 0x4D2);
+  ASSERT_EQ(group.sessions.size(), 1);
+  EXPECT_EQ(group.sessions[0].hwnd, 0x4D2);
+  ASSERT_EQ(group.sessions[0].rules.size(), 1);
+  EXPECT_EQ(group.sessions[0].rules[0].hwnd, 0x4D2);
 }
 
 TEST(SessionGroupCliTest, RequiresGroupNameWhenOptionsPresent) {
@@ -491,7 +557,8 @@ TEST(SessionGroupCliTest, CliOverridesConfigFilePortMode) {
     file << R"({
       "port_mode": "single-port",
       "session_groups": [
-        {"name": "cfg-group", "capture": "window", "rules": [{"process": "x.exe"}]}
+        {"name": "cfg-group", "capture": "window",
+         "sessions": [{"id": 1, "name": "s", "rules": [{"process": "x.exe"}]}]}
       ]
     })";
   }
@@ -614,12 +681,31 @@ namespace {
     session_group::groups_config_t saved_;  ///< Active groups restored on destruction.
   };
 
+  /**
+   * @brief Build a window capture group with a single explicit-hwnd session.
+   *
+   * @param name Group name.
+   * @param hwnd Session window handle.
+   * @return Configured group.
+   */
+  session_group::config_t make_group(const std::string &name, std::string capture, std::uintptr_t hwnd) {
+    session_group::config_t group;
+    group.name = name;
+    group.capture = std::move(capture);
+    session_group::session_config_t session;
+    session.id = 1;
+    session.name = name;
+    session.hwnd = hwnd;
+    group.sessions.emplace_back(std::move(session));
+    return group;
+  }
+
 }  // namespace
 
 TEST(SessionGroupResolveActiveTest, ReturnsNameForSingleWindowGroup) {
   ActiveGroupsGuard guard;
   session_group::active_groups = session_group::groups_config_t {};
-  session_group::active_groups.groups.emplace_back(session_group::config_t {"user1", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, 60, 20000});
+  session_group::active_groups.groups.emplace_back(make_group("user1", std::string {session_group::CAPTURE_WINDOW}, 0x4D2));
 
   EXPECT_EQ(session_group::resolve_active_window_group(), "user1");
 }
@@ -627,7 +713,7 @@ TEST(SessionGroupResolveActiveTest, ReturnsNameForSingleWindowGroup) {
 TEST(SessionGroupResolveActiveTest, ReturnsEmptyWhenNoWindowGroup) {
   ActiveGroupsGuard guard;
   session_group::active_groups = session_group::groups_config_t {};
-  session_group::active_groups.groups.emplace_back(session_group::config_t {"mon", std::string {session_group::CAPTURE_MONITOR}, 48010, 0, {}, {}, 60, 0});
+  session_group::active_groups.groups.emplace_back(make_group("mon", std::string {session_group::CAPTURE_MONITOR}, 0));
 
   EXPECT_TRUE(session_group::resolve_active_window_group().empty());
 }
@@ -635,8 +721,8 @@ TEST(SessionGroupResolveActiveTest, ReturnsEmptyWhenNoWindowGroup) {
 TEST(SessionGroupResolveActiveTest, ReturnsEmptyForMultipleWindowGroups) {
   ActiveGroupsGuard guard;
   session_group::active_groups = session_group::groups_config_t {};
-  session_group::active_groups.groups.emplace_back(session_group::config_t {"a", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, 60, 0});
-  session_group::active_groups.groups.emplace_back(session_group::config_t {"b", std::string {session_group::CAPTURE_WINDOW}, 48011, 0x4D3, {}, {}, 60, 0});
+  session_group::active_groups.groups.emplace_back(make_group("a", std::string {session_group::CAPTURE_WINDOW}, 0x4D2));
+  session_group::active_groups.groups.emplace_back(make_group("b", std::string {session_group::CAPTURE_WINDOW}, 0x4D3));
 
   EXPECT_TRUE(session_group::resolve_active_window_group().empty());
 }
@@ -644,7 +730,7 @@ TEST(SessionGroupResolveActiveTest, ReturnsEmptyForMultipleWindowGroups) {
 TEST(SessionGroupResolveLaunchTest, HonorsExplicitGroupName) {
   ActiveGroupsGuard guard;
   session_group::active_groups = session_group::groups_config_t {};
-  session_group::active_groups.groups.emplace_back(session_group::config_t {"a", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, 60, 0});
+  session_group::active_groups.groups.emplace_back(make_group("a", std::string {session_group::CAPTURE_WINDOW}, 0x4D2));
 
   EXPECT_EQ(session_group::resolve_launch_group("a"), "a");
   EXPECT_TRUE(session_group::resolve_launch_group("missing").empty());
@@ -653,7 +739,7 @@ TEST(SessionGroupResolveLaunchTest, HonorsExplicitGroupName) {
 TEST(SessionGroupResolveLaunchTest, FallsBackToSingleWindowGroup) {
   ActiveGroupsGuard guard;
   session_group::active_groups = session_group::groups_config_t {};
-  session_group::active_groups.groups.emplace_back(session_group::config_t {"user1", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, 60, 20000});
+  session_group::active_groups.groups.emplace_back(make_group("user1", std::string {session_group::CAPTURE_WINDOW}, 0x4D2));
 
   EXPECT_EQ(session_group::resolve_launch_group(""), "user1");
 }
@@ -661,8 +747,8 @@ TEST(SessionGroupResolveLaunchTest, FallsBackToSingleWindowGroup) {
 TEST(SessionGroupResolveLaunchTest, ReturnsEmptyForMultipleGroupsWithoutExplicitName) {
   ActiveGroupsGuard guard;
   session_group::active_groups = session_group::groups_config_t {};
-  session_group::active_groups.groups.emplace_back(session_group::config_t {"a", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, 60, 0});
-  session_group::active_groups.groups.emplace_back(session_group::config_t {"b", std::string {session_group::CAPTURE_WINDOW}, 48011, 0x4D3, {}, {}, 60, 0});
+  session_group::active_groups.groups.emplace_back(make_group("a", std::string {session_group::CAPTURE_WINDOW}, 0x4D2));
+  session_group::active_groups.groups.emplace_back(make_group("b", std::string {session_group::CAPTURE_WINDOW}, 0x4D3));
 
   EXPECT_TRUE(session_group::resolve_launch_group("").empty());
 }
@@ -671,8 +757,8 @@ TEST(SessionGroupResolveLaunchTest, UsesConfiguredDefaultGroup) {
   ActiveGroupsGuard guard;
   session_group::active_groups = session_group::groups_config_t {};
   session_group::active_groups.default_group = "b";
-  session_group::active_groups.groups.emplace_back(session_group::config_t {"a", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, 60, 0});
-  session_group::active_groups.groups.emplace_back(session_group::config_t {"b", std::string {session_group::CAPTURE_WINDOW}, 48011, 0x4D3, {}, {}, 60, 0});
+  session_group::active_groups.groups.emplace_back(make_group("a", std::string {session_group::CAPTURE_WINDOW}, 0x4D2));
+  session_group::active_groups.groups.emplace_back(make_group("b", std::string {session_group::CAPTURE_WINDOW}, 0x4D3));
 
   EXPECT_EQ(session_group::resolve_launch_group(""), "b");
   // An explicit group still wins over the default.
@@ -683,7 +769,7 @@ TEST(SessionGroupResolveLaunchTest, IgnoresUnknownDefaultGroup) {
   ActiveGroupsGuard guard;
   session_group::active_groups = session_group::groups_config_t {};
   session_group::active_groups.default_group = "ghost";
-  session_group::active_groups.groups.emplace_back(session_group::config_t {"a", std::string {session_group::CAPTURE_WINDOW}, 48010, 0x4D2, {}, {}, 60, 0});
+  session_group::active_groups.groups.emplace_back(make_group("a", std::string {session_group::CAPTURE_WINDOW}, 0x4D2));
 
   // "ghost" is not a configured window group, so the lone group wins.
   EXPECT_EQ(session_group::resolve_launch_group(""), "a");
@@ -692,44 +778,43 @@ TEST(SessionGroupResolveLaunchTest, IgnoresUnknownDefaultGroup) {
 TEST(SessionGroupResolveLaunchTest, IgnoresNonWindowGroups) {
   ActiveGroupsGuard guard;
   session_group::active_groups = session_group::groups_config_t {};
-  session_group::active_groups.groups.emplace_back(session_group::config_t {"mon", std::string {session_group::CAPTURE_MONITOR}, 48010, 0, {}, {}, 60, 0});
+  session_group::active_groups.groups.emplace_back(make_group("mon", std::string {session_group::CAPTURE_MONITOR}, 0));
 
   EXPECT_TRUE(session_group::resolve_launch_group("").empty());
   EXPECT_TRUE(session_group::resolve_launch_group("mon").empty());
 }
 
-TEST(SessionGroupMatcherTest, GroupLevelHwndWinsImmediately) {
-  session_group::config_t group;
-  group.capture = std::string {session_group::CAPTURE_WINDOW};
-  group.hwnd = 0x1234;
+TEST(SessionGroupMatcherTest, SessionHwndWinsImmediately) {
+  session_group::session_config_t session;
+  session.hwnd = 0x1234;
 
-  EXPECT_EQ(session_group::match_window_hwnd(group), 0x1234);
+  EXPECT_EQ(session_group::match_window_hwnd(session), 0x1234);
 }
 
-TEST(SessionGroupMatcherTest, RuleLevelHwndWinsWhenGroupHasNone) {
-  session_group::config_t group;
-  group.capture = std::string {session_group::CAPTURE_WINDOW};
-
+TEST(SessionGroupMatcherTest, RuleLevelHwndWinsWhenSessionHasNone) {
+  session_group::session_config_t session;
   session_group::window_rule_t rule;
   rule.hwnd = 0x5678;
-  group.rules.emplace_back(rule);
+  session.rules.emplace_back(rule);
 
-  EXPECT_EQ(session_group::match_window_hwnd(group), 0x5678);
-}
-
-TEST(SessionGroupMatcherTest, ReturnsZeroForNonWindowGroup) {
-  session_group::config_t group;
-  group.capture = std::string {session_group::CAPTURE_MONITOR};
-  group.hwnd = 0x1234;
-
-  EXPECT_EQ(session_group::match_window_hwnd(group), 0);
+  EXPECT_EQ(session_group::match_window_hwnd(session), 0x5678);
 }
 
 TEST(SessionGroupMatcherTest, InvalidWindowNeverMatchesEmptyRules) {
-  // An invalid handle cannot match a group whose rules carry no criteria.
-  session_group::config_t group;
-  group.capture = std::string {session_group::CAPTURE_WINDOW};
+  // An invalid handle cannot match a session whose rules carry no criteria.
+  session_group::session_config_t session;
 
-  EXPECT_FALSE(session_group::match_window(group, 0xDEADBEEF));
-  EXPECT_FALSE(session_group::match_window(group, 0));
+  EXPECT_FALSE(session_group::match_window(session, 0xDEADBEEF));
+  EXPECT_FALSE(session_group::match_window(session, 0));
+}
+
+TEST(SessionGroupMatcherTest, FirstSessionReturnsNullWhenEmpty) {
+  session_group::config_t group;
+  EXPECT_EQ(session_group::first_session(group), nullptr);
+
+  session_group::session_config_t session;
+  session.id = 7;
+  group.sessions.emplace_back(session);
+  ASSERT_NE(session_group::first_session(group), nullptr);
+  EXPECT_EQ(session_group::first_session(group)->id, 7);
 }

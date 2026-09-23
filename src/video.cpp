@@ -1508,11 +1508,11 @@ namespace video {
    * @param group_name Optional session group name.
    * @param session_key Optional session identifier.
    */
-  void reset_display(std::shared_ptr<platf::display_t> &disp, const platf::mem_type_e &type, const std::string &display_name, const config_t &config, const std::string_view &group_name = {}, const std::string_view &session_key = {}) {
+  void reset_display(std::shared_ptr<platf::display_t> &disp, const platf::mem_type_e &type, const std::string &display_name, const config_t &config, const std::string_view &group_name = {}, const std::string_view &session_key = {}, std::uintptr_t preferred_hwnd = 0) {
     // We try this twice, in case we still get an error on reinitialization
     for (int x = 0; x < 2; ++x) {
       disp.reset();
-      disp = platf::display(type, display_name, config, group_name, session_key);
+      disp = platf::display(type, display_name, config, group_name, session_key, preferred_hwnd);
       if (disp) {
         break;
       }
@@ -1620,10 +1620,12 @@ namespace video {
     std::vector<std::string> display_names;
     int display_p = -1;
     refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
-    auto disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config, group_name, session_key);
+    std::uintptr_t window_anchor = 0;
+    auto disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config, group_name, session_key, window_anchor);
     if (!disp) {
       return;
     }
+    window_anchor = disp->window_anchor_handle();
     display_wp = disp;
 
     constexpr auto capture_buffer_size = 12;
@@ -1816,8 +1818,9 @@ namespace video {
               }
 
               // reset_display() will sleep between retries
-              reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config, group_name, session_key);
+              reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config, group_name, session_key, window_anchor);
               if (disp) {
+                window_anchor = disp->window_anchor_handle();
                 break;
               }
             }

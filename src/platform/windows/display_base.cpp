@@ -1014,7 +1014,7 @@ namespace platf {
    * Pick a display adapter and capture method.
    * @param hwdevice_type enables possible use of hardware encoder
    */
-  std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config, const std::string_view &group_name, const std::string_view &session_key) {
+  std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config, const std::string_view &group_name, const std::string_view &session_key, std::uintptr_t preferred_hwnd) {
     if (config::video.capture == "window") {
       // Prefer the group identified by group_name, then fall back to the first
       // window group.
@@ -1035,7 +1035,14 @@ namespace platf {
         return nullptr;
       }
 
-      auto target_hwnd = session_group::match_window_hwnd(*selected_group);
+      // Reuse the previously bound anchor when reinitializing so a window
+      // resize does not re-select a different application; otherwise match the
+      // largest window of the group. Session-id routing (R3) is not wired up
+      // yet, so the group's first session is used until then.
+      const auto *session = session_group::first_session(*selected_group);
+      auto target_hwnd = (preferred_hwnd != 0 && IsWindow(reinterpret_cast<HWND>(preferred_hwnd)))
+        ? preferred_hwnd
+        : (session != nullptr ? session_group::match_window_hwnd(*session) : std::uintptr_t {0});
       if (!target_hwnd) {
         BOOST_LOG(error) << "Window capture group ["sv << selected_group->name << "] matched no window"sv;
         return nullptr;
@@ -1043,14 +1050,15 @@ namespace platf {
 
       // Hardware encoders consume the GPU-backed window backend; software
       // encoders use the RAM backend (no GPU->CPU staging for hardware).
+      const std::vector<std::string> aux_exclude = session != nullptr ? session->aux_exclude : std::vector<std::string> {};
       if (hwdevice_type == mem_type_e::dxgi) {
         auto disp = std::make_shared<dxgi::display_window_vram_t>();
-        if (!disp->init(config, display_name, (HWND) target_hwnd, session_key, selected_group->aux_exclude)) {
+        if (!disp->init(config, display_name, (HWND) target_hwnd, session_key, aux_exclude)) {
           return disp;
         }
       } else {
         auto disp = std::make_shared<dxgi::display_window_t>();
-        if (!disp->init(config, display_name, (HWND) target_hwnd, session_key, selected_group->aux_exclude)) {
+        if (!disp->init(config, display_name, (HWND) target_hwnd, session_key, aux_exclude)) {
           return disp;
         }
       }

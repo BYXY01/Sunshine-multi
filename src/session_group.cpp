@@ -40,6 +40,10 @@ namespace session_group {
    */
   groups_config_t active_groups;
 
+  void seed_active_groups(groups_config_t groups) {
+    active_groups = std::move(groups);
+  }
+
   std::optional<std::pair<std::uint16_t, std::uint16_t>> parse_port_range(const std::string &range) {
     auto dash = range.find('-');
     if (dash == std::string::npos || dash == 0 || dash + 1 >= range.size()) {
@@ -277,27 +281,37 @@ namespace session_group {
       group.name = group_node.get<std::string>("name", "");
       group.capture = group_node.get<std::string>("capture", std::string {CAPTURE_WINDOW});
       group.port = static_cast<std::uint16_t>(group_node.get<int>("port", 0));
-      group.hwnd = parse_hwnd(group_node.get<std::string>("hwnd", ""));
       group.max_fps = group_node.get<int>("max_fps", 60);
       group.bitrate_kbps = group_node.get<int>("bitrate_kbps", 0);
 
-      if (auto rules_node = group_node.get_child_optional("rules")) {
-        for (auto &[_, rule_node] : *rules_node) {
-          window_rule_t rule;
-          rule.box = rule_node.get<std::string>("box", "");
-          rule.process = rule_node.get<std::string>("process", "");
-          rule.title = rule_node.get<std::string>("title", "");
-          rule.window_class = rule_node.get<std::string>("class", "");
-          rule.hwnd = parse_hwnd(rule_node.get<std::string>("hwnd", ""));
-          if (!rule.empty()) {
-            group.rules.emplace_back(std::move(rule));
-          }
-        }
-      }
+      if (auto sessions_node = group_node.get_child_optional("sessions")) {
+        for (auto &[_, session_node] : *sessions_node) {
+          session_config_t session;
+          session.id = session_node.get<int>("id", 0);
+          session.name = session_node.get<std::string>("name", "");
+          session.hwnd = parse_hwnd(session_node.get<std::string>("hwnd", ""));
 
-      if (auto aux_node = group_node.get_child_optional("aux_exclude")) {
-        for (auto &[_, aux] : *aux_node) {
-          group.aux_exclude.emplace_back(aux.data());
+          if (auto rules_node = session_node.get_child_optional("rules")) {
+            for (auto &[_, rule_node] : *rules_node) {
+              window_rule_t rule;
+              rule.box = rule_node.get<std::string>("box", "");
+              rule.process = rule_node.get<std::string>("process", "");
+              rule.title = rule_node.get<std::string>("title", "");
+              rule.window_class = rule_node.get<std::string>("class", "");
+              rule.hwnd = parse_hwnd(rule_node.get<std::string>("hwnd", ""));
+              if (!rule.empty()) {
+                session.rules.emplace_back(std::move(rule));
+              }
+            }
+          }
+
+          if (auto aux_node = session_node.get_child_optional("aux_exclude")) {
+            for (auto &[_, aux] : *aux_node) {
+              session.aux_exclude.emplace_back(aux.data());
+            }
+          }
+
+          group.sessions.emplace_back(std::move(session));
         }
       }
 
@@ -362,8 +376,24 @@ namespace session_group {
         errors.emplace_back("invalid capture backend for group '" + group.name + "': " + group.capture);
       }
 
-      if (group.capture == CAPTURE_WINDOW && group.hwnd == 0 && group.rules.empty()) {
-        errors.emplace_back("window capture group '" + group.name + "' must define at least one matching rule or a group-level hwnd");
+      if (group.capture == CAPTURE_WINDOW && group.sessions.empty()) {
+        errors.emplace_back("window capture group '" + group.name + "' must define at least one session");
+      }
+
+      std::unordered_set<int> session_ids;
+      std::unordered_set<std::string> session_names;
+      for (const auto &session : group.sessions) {
+        if (session.id == 0) {
+          errors.emplace_back("session in group '" + group.name + "' must have a non-zero id (the Moonlight appid)");
+        } else if (!session_ids.insert(session.id).second) {
+          errors.emplace_back("duplicate session id " + std::to_string(session.id) + " in group '" + group.name + "'");
+        }
+        if (!session.name.empty() && !session_names.insert(session.name).second) {
+          errors.emplace_back("duplicate session name '" + session.name + "' in group '" + group.name + "'");
+        }
+        if (group.capture == CAPTURE_WINDOW && session.empty()) {
+          errors.emplace_back("window capture session '" + session.name + "' in group '" + group.name + "' must define at least one matching rule or an hwnd");
+        }
       }
     }
 
@@ -455,7 +485,11 @@ namespace session_group {
       group.name = opts.group_name;
       group.capture = opts.capture.empty() ? std::string {CAPTURE_WINDOW} : opts.capture;
       group.port = opts.port.value_or(0);
-      group.hwnd = opts.hwnd;
+
+      session_config_t session;
+      session.id = 1;
+      session.name = opts.group_name;
+      session.hwnd = opts.hwnd;
 
       window_rule_t rule;
       rule.box = opts.box;
@@ -464,9 +498,10 @@ namespace session_group {
       rule.window_class = opts.window_class;
       rule.hwnd = opts.hwnd;
       if (!rule.empty()) {
-        group.rules.emplace_back(std::move(rule));
+        session.rules.emplace_back(std::move(rule));
       }
 
+      group.sessions.emplace_back(std::move(session));
       result.groups.emplace_back(std::move(group));
     }
     return result;
@@ -704,36 +739,35 @@ namespace session_group {
 
 #endif  // _WIN32
 
-  bool match_window(const config_t &group, std::uintptr_t hwnd) {
-#ifdef _WIN32
-    if (!group.is_window_capture()) {
-      return false;
-    }
+  const session_config_t *first_session(const config_t &group) {
+    return group.sessions.empty() ? nullptr : &group.sessions.front();
+  }
 
+  bool match_window(const session_config_t &session, std::uintptr_t hwnd) {
+#ifdef _WIN32
     auto process_name = window_process_name(reinterpret_cast<HWND>(hwnd));
     auto title = window_title(reinterpret_cast<HWND>(hwnd));
     auto class_name = window_class_name(reinterpret_cast<HWND>(hwnd));
 
-    for (const auto &rule : group.rules) {
+    for (const auto &rule : session.rules) {
       if (rule_matches(rule, hwnd, process_name, title, class_name)) {
         return true;
       }
     }
+#else
+    (void) session;
+    (void) hwnd;
 #endif  // _WIN32
     return false;
   }
 
-  std::uintptr_t match_window_hwnd(const config_t &group) {
+  std::uintptr_t match_window_hwnd(const session_config_t &session) {
 #ifdef _WIN32
-    if (!group.is_window_capture()) {
-      return 0;
-    }
-
     // An explicit handle wins immediately.
-    if (group.hwnd != 0) {
-      return group.hwnd;
+    if (session.hwnd != 0) {
+      return session.hwnd;
     }
-    for (const auto &rule : group.rules) {
+    for (const auto &rule : session.rules) {
       if (rule.hwnd != 0) {
         return rule.hwnd;
       }
@@ -743,17 +777,17 @@ namespace session_group {
     // listed in `aux_exclude` are skipped, and the largest matching window is
     // preferred so that a small popup or menu never wins over the main window.
     struct enum_ctx_t {
-      const config_t *group;  ///< Group rules to match against.
+      const session_config_t *session;  ///< Session rules to match against.
       std::vector<std::string> excluded;  ///< Lowercased aux_exclude class names.
       std::uintptr_t best;  ///< Largest matching HWND found so far.
       long best_area;  ///< Pixel area of the best match.
     };
     std::vector<std::string> excluded;
-    excluded.reserve(group.aux_exclude.size());
-    for (const auto &aux : group.aux_exclude) {
+    excluded.reserve(session.aux_exclude.size());
+    for (const auto &aux : session.aux_exclude) {
       excluded.push_back(to_ascii_lower(aux));
     }
-    enum_ctx_t ctx {&group, std::move(excluded), 0, 0};
+    enum_ctx_t ctx {&session, std::move(excluded), 0, 0};
 
     EnumWindows([](HWND hwnd, LPARAM lparam) -> BOOL {
       auto *data = reinterpret_cast<enum_ctx_t *>(lparam);
@@ -770,7 +804,7 @@ namespace session_group {
         return TRUE;
       }
 
-      for (const auto &rule : data->group->rules) {
+      for (const auto &rule : data->session->rules) {
         if (rule_matches(rule, reinterpret_cast<std::uintptr_t>(hwnd), process_name, title, class_name)) {
           RECT rect {};
           GetWindowRect(hwnd, &rect);
@@ -789,7 +823,7 @@ namespace session_group {
 
     return ctx.best;
 #else
-    (void) group;
+    (void) session;
     return 0;
 #endif  // _WIN32
   }
