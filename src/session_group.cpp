@@ -743,6 +743,17 @@ namespace session_group {
     return group.sessions.empty() ? nullptr : &group.sessions.front();
   }
 
+  const session_config_t *resolve_session(const config_t &group, int id) {
+    if (id != 0) {
+      for (const auto &session : group.sessions) {
+        if (session.id == id) {
+          return &session;
+        }
+      }
+    }
+    return first_session(group);
+  }
+
   bool match_window(const session_config_t &session, std::uintptr_t hwnd) {
 #ifdef _WIN32
     auto process_name = window_process_name(reinterpret_cast<HWND>(hwnd));

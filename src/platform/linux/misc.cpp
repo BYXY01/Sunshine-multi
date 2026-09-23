@@ -1261,9 +1261,10 @@ namespace platf {
     return true;
   }
 
-  std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config, const std::string_view &group_name, const std::string_view &session_key, std::uintptr_t preferred_hwnd) {
+  std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config, const std::string_view &group_name, const std::string_view &session_key, int session_id, std::uintptr_t preferred_hwnd) {
     (void) group_name;  // Session groups are a Windows window-capture feature.
     (void) session_key;
+    (void) session_id;
     (void) preferred_hwnd;
     // Keep KMS as first element to check before dropping CAP_SYS_ADMIN
 #ifdef SUNSHINE_BUILD_DRM

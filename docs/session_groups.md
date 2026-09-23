@@ -142,11 +142,14 @@ screen-relative offset with alpha blending, so no CPU round trip is needed. If
 GPU composition fails, the backend falls back to compositing on the CPU and
 uploading the result.
 
-> The single-window/anchor semantics used before the model rework are being
-> replaced by per-session window-set composition (see the session-group rework
-> plan in the project documents). Until session-id routing and per-session
-> window enumeration land, the capture backend resolves the group's first
-> session as a placeholder.
+A client selects a session by its `appid`; the capture backend resolves that
+session within the group and composes the windows matching the session's rules
+(regardless of the owning process), so the session's own menus, dialogs and
+other windows appear in its picture while other sessions stay isolated.
+
+> The per-session **canvas** is currently the main window's rectangle; the
+> target-resolution black canvas planned for the multi-process layout stage is
+> not implemented yet.
 
 ## Command line
 

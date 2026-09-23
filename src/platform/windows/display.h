@@ -16,6 +16,7 @@
 
 // local includes
 #include "src/platform/common.h"
+#include "src/session_group.h"
 #include "src/utility.h"
 #include "src/video.h"
 
@@ -917,14 +918,15 @@ namespace platf::dxgi {
   class window_capture_set_t {
   public:
     /**
-     * @brief Bind to the process owning the anchor window.
+     * @brief Bind to the session whose windows the set composes.
      *
      * @param display Window display backend supplying the D3D device.
      * @param config Capture configuration used to create WGC items.
-     * @param anchor Anchor window matched by the group rules.
-     * @param aux_exclude Window classes excluded from the frame.
+     * @param anchor Anchor (largest) window of the session.
+     * @param session_key Session identifier used for runtime window state.
+     * @param session Session whose window rules and aux_exclude define membership.
      */
-    window_capture_set_t(display_base_t *display, const ::video::config_t &config, HWND anchor, const std::string_view &session_key, const std::vector<std::string> &aux_exclude = {});
+    window_capture_set_t(display_base_t *display, const ::video::config_t &config, HWND anchor, const std::string_view &session_key, const session_group::session_config_t &session);
 
     /**
      * @brief Re-enumerate the process windows and refresh the set.
@@ -1049,9 +1051,9 @@ namespace platf::dxgi {
 
     display_base_t *display_;  ///< Display backend supplying the D3D device.
     HWND anchor_;  ///< Anchor window handle.
-    std::uint32_t pid_ {0};  ///< Process bound by the anchor window.
     std::string session_key_;  ///< Session identifier used to read the per-session runtime state.
     std::vector<std::string> aux_exclude_;  ///< Window classes excluded from the frame.
+    session_group::session_config_t session_;  ///< Session whose window rules define the set's membership.
     ::video::config_t config_;  ///< Capture configuration for WGC item creation.
     std::map<HWND, std::unique_ptr<window_item_t>> windows_;  ///< Auxiliary windows keyed by handle.
   };
@@ -1083,10 +1085,10 @@ namespace platf::dxgi {
      * @param config Configuration values to apply.
      * @param display_name Display name.
      * @param hwnd Anchor window handle matched by the group rules.
-     * @param aux_exclude Window classes excluded from the frame.
+     * @param session Session whose window rules and aux_exclude define membership.
      * @return 0 on success; nonzero or negative platform status on failure.
      */
-    int init(const ::video::config_t &config, const std::string &display_name, HWND hwnd, const std::string_view &session_key = {}, const std::vector<std::string> &aux_exclude = {});
+    int init(const ::video::config_t &config, const std::string &display_name, HWND hwnd, const std::string_view &session_key = {}, const session_group::session_config_t &session = session_group::session_config_t {});
     /**
      * @brief Capture a window frame into the provided image object.
      *
@@ -1202,10 +1204,10 @@ namespace platf::dxgi {
      * @param config Configuration values to apply.
      * @param display_name Display name.
      * @param hwnd Anchor window handle matched by the group rules.
-     * @param aux_exclude Window classes excluded from the frame.
+     * @param session Session whose window rules and aux_exclude define membership.
      * @return 0 on success; nonzero or negative platform status on failure.
      */
-    int init(const ::video::config_t &config, const std::string &display_name, HWND hwnd, const std::string_view &session_key = {}, const std::vector<std::string> &aux_exclude = {});
+    int init(const ::video::config_t &config, const std::string &display_name, HWND hwnd, const std::string_view &session_key = {}, const session_group::session_config_t &session = session_group::session_config_t {});
     /**
      * @brief Capture a window frame into the provided image object.
      *

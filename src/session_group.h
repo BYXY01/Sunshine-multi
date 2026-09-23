@@ -400,6 +400,20 @@ namespace session_group {
   const session_config_t *first_session(const config_t &group);
 
   /**
+   * @brief Resolve a session of a group by its identifier.
+   *
+   * Returns the session whose id matches `id`. When `id` is zero or does not
+   * match any session, the group's first session is returned (or nullptr when
+   * the group has none). This keeps the capture backend working before a client
+   * has selected a session.
+   *
+   * @param group Group to search.
+   * @param id Session identifier (Moonlight appid); zero falls back to the first session.
+   * @return Pointer to the resolved session, or nullptr when the group has none.
+   */
+  const session_config_t *resolve_session(const config_t &group, int id);
+
+  /**
    * @brief Match a single top-level window against a session's rules.
    *
    * The window belongs to the session when any rule matches it (OR semantics).

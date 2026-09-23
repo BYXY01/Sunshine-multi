@@ -674,6 +674,7 @@ namespace video {
     sync_util::sync_t<std::weak_ptr<platf::display_t>> display_wp;  ///< Display wp.
     std::string group_name;  ///< Session group name; empty selects the legacy single display.
     std::string session_key;  ///< Session identifier; used to key the per-session display and runtime state.
+    int session_id {0};  ///< Session identifier (Moonlight appid) selecting the session's window rules within the group.
   };
 
   /**
@@ -725,26 +726,28 @@ namespace video {
    *
    * @param group_name Session group name.
    * @param session_key Session identifier (client name).
+   * @param session_id Session identifier (Moonlight appid) selecting the session's window rules.
    * @return Reference to the session's capture context, or null on failure.
    */
-  safe::shared_t<capture_thread_async_ctx_t>::ptr_t capture_session_ref(const std::string &group_name, const std::string &session_key) {
+  safe::shared_t<capture_thread_async_ctx_t>::ptr_t capture_session_ref(const std::string &group_name, const std::string &session_key, int session_id) {
     static std::mutex mutex;
     static std::unordered_map<std::string, std::shared_ptr<safe::shared_t<capture_thread_async_ctx_t>>> sessions;
 
     // Key by group and session so two clients of the same group get independent
     // capture threads and displays.
-    const std::string key = group_name + '\0' + session_key;
+    const std::string key = group_name + '\0' + std::to_string(session_id);
 
     std::lock_guard lg {mutex};
 
     auto &entry = sessions[key];
     if (!entry) {
       entry = std::make_shared<safe::shared_t<capture_thread_async_ctx_t>>(
-        [bound_group = group_name, bound_session = session_key](capture_thread_async_ctx_t &ctx) mutable {
+        [bound_group = group_name, bound_session = session_key, bound_id = session_id](capture_thread_async_ctx_t &ctx) mutable {
           // Bind the group and session identifiers before the capture thread
           // starts so it can create the correct per-session display.
           ctx.group_name = std::move(bound_group);
           ctx.session_key = std::move(bound_session);
+          ctx.session_id = bound_id;
           return start_capture_async(ctx);
         },
         end_capture_async
@@ -1507,12 +1510,14 @@ namespace video {
    * @param config Configuration values to apply.
    * @param group_name Optional session group name.
    * @param session_key Optional session identifier.
+   * @param session_id Optional session identifier (Moonlight appid) selecting the session's window rules.
+   * @param preferred_hwnd Optional anchor window reused across reinitialization.
    */
-  void reset_display(std::shared_ptr<platf::display_t> &disp, const platf::mem_type_e &type, const std::string &display_name, const config_t &config, const std::string_view &group_name = {}, const std::string_view &session_key = {}, std::uintptr_t preferred_hwnd = 0) {
+  void reset_display(std::shared_ptr<platf::display_t> &disp, const platf::mem_type_e &type, const std::string &display_name, const config_t &config, const std::string_view &group_name = {}, const std::string_view &session_key = {}, int session_id = 0, std::uintptr_t preferred_hwnd = 0) {
     // We try this twice, in case we still get an error on reinitialization
     for (int x = 0; x < 2; ++x) {
       disp.reset();
-      disp = platf::display(type, display_name, config, group_name, session_key, preferred_hwnd);
+      disp = platf::display(type, display_name, config, group_name, session_key, session_id, preferred_hwnd);
       if (disp) {
         break;
       }
@@ -1590,7 +1595,8 @@ namespace video {
     safe::signal_t &reinit_event,
     const encoder_t &encoder,
     const std::string_view &group_name,
-    const std::string_view &session_key
+    const std::string_view &session_key,
+    int session_id
   ) {
     std::vector<capture_ctx_t> capture_ctxs;
 
@@ -1621,7 +1627,7 @@ namespace video {
     int display_p = -1;
     refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
     std::uintptr_t window_anchor = 0;
-    auto disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config, group_name, session_key, window_anchor);
+    auto disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config, group_name, session_key, session_id, window_anchor);
     if (!disp) {
       return;
     }
@@ -1818,7 +1824,7 @@ namespace video {
               }
 
               // reset_display() will sleep between retries
-              reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config, group_name, session_key, window_anchor);
+              reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config, group_name, session_key, session_id, window_anchor);
               if (disp) {
                 window_anchor = disp->window_anchor_handle();
                 break;
@@ -2907,7 +2913,8 @@ namespace video {
     config_t &config,
     void *channel_data,
     const std::string &group_name = {},
-    const std::string &session_key = {}
+    const std::string &session_key = {},
+    int session_id = 0
   ) {
     auto shutdown_event = mail->event<bool>(mail::shutdown);
 
@@ -2919,7 +2926,7 @@ namespace video {
 
     // Select the capture context: the per-session thread when a group is named,
     // otherwise the legacy shared thread.
-    auto group_ref = group_name.empty() ? safe::shared_t<capture_thread_async_ctx_t>::ptr_t {} : capture_session_ref(group_name, session_key);
+    auto group_ref = group_name.empty() ? safe::shared_t<capture_thread_async_ctx_t>::ptr_t {} : capture_session_ref(group_name, session_key, session_id);
     auto ref = group_ref ? std::move(group_ref) : capture_thread_async.ref();
     if (!ref) {
       return;
@@ -2999,13 +3006,15 @@ namespace video {
    * @param channel_data Opaque channel data passed to packets.
    * @param group_name Session group name (may be empty for the legacy path).
    * @param session_key Session identifier used to key the per-session display.
+   * @param session_id Session identifier (Moonlight appid) selecting the session's window rules.
    */
   void capture(
     safe::mail_t mail,
     config_t config,
     void *channel_data,
     const std::string &group_name,
-    const std::string &session_key
+    const std::string &session_key,
+    int session_id
   ) {
     config = resolve_dynamic_range(*chosen_encoder, config);
 
@@ -3013,7 +3022,7 @@ namespace video {
 
     idr_events->raise(true);
     if (chosen_encoder->flags & PARALLEL_ENCODING) {
-      capture_async(std::move(mail), config, channel_data, group_name, session_key);
+      capture_async(std::move(mail), config, channel_data, group_name, session_key, session_id);
     } else {
       safe::signal_t join_event;
       auto ref = capture_thread_sync.ref();
@@ -3702,7 +3711,8 @@ namespace video {
       std::ref(capture_thread_ctx.reinit_event),
       std::ref(*capture_thread_ctx.encoder_p),
       std::string {capture_thread_ctx.group_name},
-      std::string {capture_thread_ctx.session_key}
+      std::string {capture_thread_ctx.session_key},
+      capture_thread_ctx.session_id
     };
 
     return 0;

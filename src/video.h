@@ -700,13 +700,16 @@ namespace video {
    * @param channel_data Opaque channel data passed to packets.
    * @param group_name Optional session group; clients of the same group share
    * one capture thread and display. Empty selects the legacy shared capture.
+   * @param session_key Optional session identifier used to key the per-session display.
+   * @param session_id Optional session identifier (Moonlight appid) selecting the session's window rules.
    */
   void capture(
     safe::mail_t mail,
     config_t config,
     void *channel_data,
     const std::string &group_name = {},
-    const std::string &session_key = {}
+    const std::string &session_key = {},
+    int session_id = 0
   );
 
   /**

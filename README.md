@@ -41,10 +41,10 @@ Feature additions (step by step):
 | 6.4-4 | **GPU popup composition** — the GPU-backed (hardware) window backend composites popups on the GPU, drawing them onto the capture texture after the anchor frame (no CPU round trip); falls back to CPU composition if GPU composition fails. |
 | 6.4r-1 | **Session model rework** — a group now holds `sessions[]`, each session carrying its own window matching rules and `aux_exclude` list. This is the first step of the rework that replaces the per-group "matched process" capture with per-session window-set composition and session-id (`appid`) routing. |
 
-> The `6.4-1` … `6.4-4` rows predate the session model rework: their per-group
-> single-process ("anchor") semantics are being replaced by per-session
-> window-set composition. Until the routing and capture steps of the rework
-> land, the capture backend resolves the group's first session as a placeholder.
+> The `6.4-1` … `6.4-4` rows predate the session model rework. The capture
+> backend now composes, for each session, the windows matching that session's
+> rules (regardless of the owning process); a client selects its session by
+> `appid`.
 
 Session groups are configured with a JSON file (`session-groups.json`) or
 command-line options (`--port-mode`, `--port-range`, `--default-group`,

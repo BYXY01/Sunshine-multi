@@ -578,15 +578,13 @@ namespace platf::dxgi {
     return result;
   }
 
-  window_capture_set_t::window_capture_set_t(display_base_t *display, const ::video::config_t &config, HWND anchor, const std::string_view &session_key, const std::vector<std::string> &aux_exclude):
+  window_capture_set_t::window_capture_set_t(display_base_t *display, const ::video::config_t &config, HWND anchor, const std::string_view &session_key, const session_group::session_config_t &session):
       display_ {display},
       anchor_ {anchor},
       session_key_ {session_key},
-      aux_exclude_ {aux_exclude},
+      aux_exclude_ {session.aux_exclude},
+      session_ {session},
       config_ {config} {
-    DWORD process_id = 0;
-    GetWindowThreadProcessId(anchor_, &process_id);
-    pid_ = process_id;
   }
 
   HWND window_capture_set_t::anchor() const {
@@ -605,11 +603,6 @@ namespace platf::dxgi {
     if (candidate == nullptr || candidate == anchor_) {
       return false;
     }
-    DWORD window_pid = 0;
-    GetWindowThreadProcessId(candidate, &window_pid);
-    if (window_pid != pid_) {
-      return false;
-    }
     if (!IsWindowVisible(candidate) || IsIconic(candidate)) {
       return false;
     }
@@ -619,7 +612,10 @@ namespace platf::dxgi {
         return false;
       }
     }
-    return true;
+    // Membership follows the session's window matching rules regardless of the
+    // owning process, so an application's menus, dialogs and explorer windows
+    // are included in the session's picture.
+    return session_group::match_window(session_, reinterpret_cast<std::uintptr_t>(candidate));
   }
 
   int window_capture_set_t::attach_window(HWND candidate) {
@@ -939,7 +935,7 @@ namespace platf::dxgi {
     return 0;
   }
 
-  int display_window_t::init(const ::video::config_t &config, const std::string &display_name, HWND hwnd, const std::string_view &session_key, const std::vector<std::string> &aux_exclude) {
+  int display_window_t::init(const ::video::config_t &config, const std::string &display_name, HWND hwnd, const std::string_view &session_key, const session_group::session_config_t &session) {
     if (init_window_device(this, config)) {
       return -1;
     }
@@ -949,7 +945,7 @@ namespace platf::dxgi {
     }
 
     this->hwnd = hwnd;
-    window_set = std::make_unique<window_capture_set_t>(this, config, hwnd, session_key, aux_exclude);
+    window_set = std::make_unique<window_capture_set_t>(this, config, hwnd, session_key, session);
     window_set->refresh();
 
     // Record the anchor's current client-area size so snapshot() can detect a
