@@ -945,6 +945,17 @@ namespace platf::dxgi {
     }
 
     this->hwnd = hwnd;
+
+    // Map client input to the captured window instead of the whole desktop, so
+    // the mouse lands where the user points inside the window stream.
+    RECT window_rect {};
+    if (GetWindowRect(hwnd, &window_rect)) {
+      offset_x = window_rect.left;
+      offset_y = window_rect.top;
+      env_width = window_rect.right - window_rect.left;
+      env_height = window_rect.bottom - window_rect.top;
+    }
+
     window_set = std::make_unique<window_capture_set_t>(this, config, hwnd, session_key, session);
     window_set->refresh();
 
