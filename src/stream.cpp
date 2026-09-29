@@ -1315,6 +1315,7 @@ namespace stream {
     auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
     while (!shutdown_event->peek() && !broadcast_shutdown_event->peek()) {
       bool has_session_awaiting_peer = false;
+      bool has_group_session = false;
 
       {
         auto lg = server->_sessions.lock();
@@ -1328,6 +1329,13 @@ namespace stream {
           }
 
           auto session = *pos;
+
+          // A session that belongs to a session group streams already-running
+          // windows; its lifetime follows the client connection, not a process
+          // app, so the loop must stay alive while such a session exists.
+          if (!session->group.empty()) {
+            has_group_session = true;
+          }
 
           if (now > session->pingTimeout) {
             auto address = session->control.peer ? platf::from_sockaddr((sockaddr *) &session->control.peer->address.address) : session->control.expected_peer_address;
@@ -1377,7 +1385,7 @@ namespace stream {
       }
 
       // Don't break until any pending sessions either expire or connect
-      if (proc::proc.running() == 0 && !has_session_awaiting_peer) {
+      if (proc::proc.running() == 0 && !has_session_awaiting_peer && !has_group_session) {
         BOOST_LOG(info) << "Process terminated"sv;
         break;
       }
