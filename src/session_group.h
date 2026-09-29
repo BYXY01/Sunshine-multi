@@ -414,6 +414,26 @@ namespace session_group {
   const session_config_t *resolve_session(const config_t &group, int id);
 
   /**
+   * @brief Collect the client-facing applications across all window groups.
+   *
+   * Each window-group session is one selectable application: its `id` is the
+   * Moonlight appid the client sends back, and its `name` is the title shown.
+   * This replaces the legacy `apps.json` list for window capture so the client
+   * selects a session directly.
+   *
+   * @return Ordered (id, name) pairs of every window-group session.
+   */
+  std::vector<std::pair<int, std::string>> session_apps();
+
+  /**
+   * @brief Check whether an appid identifies a configured window-group session.
+   *
+   * @param id Moonlight appid from the launch request.
+   * @return True when `id` matches a session of any window group.
+   */
+  bool is_session_appid(int id);
+
+  /**
    * @brief Match a single top-level window against a session's rules.
    *
    * The window belongs to the session when any rule matches it (OR semantics).

@@ -818,3 +818,49 @@ TEST(SessionGroupMatcherTest, FirstSessionReturnsNullWhenEmpty) {
   ASSERT_NE(session_group::first_session(group), nullptr);
   EXPECT_EQ(session_group::first_session(group)->id, 7);
 }
+
+TEST(SessionGroupSessionAppsTest, ListsWindowGroupSessions) {
+  ActiveGroupsGuard guard;
+  session_group::active_groups = session_group::groups_config_t {};
+
+  session_group::config_t group;
+  group.name = "g";
+  group.capture = std::string {session_group::CAPTURE_WINDOW};
+  session_group::session_config_t alpha;
+  alpha.id = 11;
+  alpha.name = "alpha";
+  session_group::session_config_t beta;
+  beta.id = 22;
+  beta.name = "beta";
+  group.sessions.emplace_back(alpha);
+  group.sessions.emplace_back(beta);
+  session_group::active_groups.groups.emplace_back(std::move(group));
+
+  auto apps = session_group::session_apps();
+  ASSERT_EQ(apps.size(), 2);
+  EXPECT_EQ(apps[0].first, 11);
+  EXPECT_EQ(apps[0].second, "alpha");
+  EXPECT_EQ(apps[1].first, 22);
+  EXPECT_EQ(apps[1].second, "beta");
+
+  EXPECT_TRUE(session_group::is_session_appid(11));
+  EXPECT_TRUE(session_group::is_session_appid(22));
+  EXPECT_FALSE(session_group::is_session_appid(33));
+}
+
+TEST(SessionGroupSessionAppsTest, IgnoresNonWindowGroups) {
+  ActiveGroupsGuard guard;
+  session_group::active_groups = session_group::groups_config_t {};
+
+  session_group::config_t group;
+  group.name = "mon";
+  group.capture = std::string {session_group::CAPTURE_MONITOR};
+  session_group::session_config_t session;
+  session.id = 5;
+  session.name = "monitor";
+  group.sessions.emplace_back(session);
+  session_group::active_groups.groups.emplace_back(std::move(group));
+
+  EXPECT_TRUE(session_group::session_apps().empty());
+  EXPECT_FALSE(session_group::is_session_appid(5));
+}

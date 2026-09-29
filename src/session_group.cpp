@@ -754,6 +754,33 @@ namespace session_group {
     return first_session(group);
   }
 
+  std::vector<std::pair<int, std::string>> session_apps() {
+    std::vector<std::pair<int, std::string>> apps;
+    for (const auto &group : active_groups.groups) {
+      if (!group.is_window_capture()) {
+        continue;
+      }
+      for (const auto &session : group.sessions) {
+        apps.emplace_back(session.id, session.name);
+      }
+    }
+    return apps;
+  }
+
+  bool is_session_appid(int id) {
+    for (const auto &group : active_groups.groups) {
+      if (!group.is_window_capture()) {
+        continue;
+      }
+      for (const auto &session : group.sessions) {
+        if (session.id == id) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   bool match_window(const session_config_t &session, std::uintptr_t hwnd) {
 #ifdef _WIN32
     auto process_name = window_process_name(reinterpret_cast<HWND>(hwnd));

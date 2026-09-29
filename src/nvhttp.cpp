@@ -1312,14 +1312,29 @@ namespace nvhttp {
 
     apps.put("<xmlattr>.status_code", 200);
 
-    for (auto &proc : proc::proc.get_apps()) {
-      pt::ptree app;
+    const auto window_apps = session_group::session_apps();
+    if (!window_apps.empty()) {
+      // Window capture: each session group session is a selectable application.
+      // The client picks a session directly, so its appid equals the session id
+      // and no entry in `apps.json` is required.
+      for (const auto &[id, name] : window_apps) {
+        pt::ptree app;
+        app.put("IsHdrSupported"s, video::active_hevc_mode >= 3 ? 1 : 0);
+        app.put("AppTitle"s, name);
+        app.put("ID", std::to_string(id));
 
-      app.put("IsHdrSupported"s, video::active_hevc_mode >= 3 ? 1 : 0);
-      app.put("AppTitle"s, proc.name);
-      app.put("ID", proc.id);
+        apps.push_back(std::make_pair("App", std::move(app)));
+      }
+    } else {
+      for (auto &proc : proc::proc.get_apps()) {
+        pt::ptree app;
 
-      apps.push_back(std::make_pair("App", std::move(app)));
+        app.put("IsHdrSupported"s, video::active_hevc_mode >= 3 ? 1 : 0);
+        app.put("AppTitle"s, proc.name);
+        app.put("ID", proc.id);
+
+        apps.push_back(std::make_pair("App", std::move(app)));
+      }
     }
   }
 
@@ -1413,13 +1428,18 @@ namespace nvhttp {
     }
 
     if (appid > 0) {
-      auto err = proc::proc.execute((int) appid, launch_session);
-      if (err) {
-        tree.put("root.<xmlattr>.status_code", err);
-        tree.put("root.<xmlattr>.status_message", "Failed to start the specified application");
-        tree.put("root.gamesession", 0);
+      if (session_group::is_session_appid((int) appid)) {
+        // Session-group application: the target windows are already running, so
+        // no process is launched and no `apps.json` entry is required.
+      } else {
+        auto err = proc::proc.execute((int) appid, launch_session);
+        if (err) {
+          tree.put("root.<xmlattr>.status_code", err);
+          tree.put("root.<xmlattr>.status_message", "Failed to start the specified application");
+          tree.put("root.gamesession", 0);
 
-        return;
+          return;
+        }
       }
     }
 
